@@ -1,6 +1,6 @@
 const { Schema, model } = require("mongoose");
 
-const tokenSchema = new mongoose.Schema({
+const tokenSchema = new Schema({
     deviceId: { type: String, required: true, unique: true },
     fcmToken: { type: String, required: true },
     intervalMinutes: { type: Number, required: true, default: 60, min: 10 },

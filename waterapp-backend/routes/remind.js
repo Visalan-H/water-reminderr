@@ -1,7 +1,7 @@
 const {Router} = require('express');
 const router = Router();
-const { cronAuth } = require('../middleware/auth');
-const { Token } = require('../config/db');
+const { cronAuth } = require('../middleware/auth-middleware');
+const { Token } = require('../models/Token-model');
 const { messaging } = require('../config/firebase');
 
 const DEAD_TOKEN_CODES = [

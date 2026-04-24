@@ -1,7 +1,7 @@
 const {Router} = require('express');
 const router = Router();
-const { registerAuth } = require('../middleware/auth');
-const { Token } = require('../config/db');
+const { registerAuth } = require('../middleware/auth-middleware');
+const { Token } = require('../models/Token-model');
 
 router.post('/', registerAuth, async (req, res) => {
     const { deviceId, fcmToken, intervalMinutes } = req.body;
