@@ -1,4 +1,4 @@
-const {Router} = require('express');
+const { Router } = require('express');
 const router = Router();
 const { registerAuth } = require('../middleware/auth-middleware');
 const { Token } = require('../models/Token-model');
@@ -12,8 +12,8 @@ router.post('/', registerAuth, async (req, res) => {
     if (!fcmToken || typeof fcmToken !== 'string' || fcmToken.length < 10) {
         return res.status(400).json({ error: 'Invalid fcmToken' });
     }
-    if (!intervalMinutes || typeof intervalMinutes !== 'number' || intervalMinutes < 10) {
-        return res.status(400).json({ error: 'intervalMinutes must be a number >= 10' });
+    if (!Number.isFinite(intervalMinutes)) {
+        return res.status(400).json({ error: 'intervalMinutes must be a number' });
     }
 
     try {
