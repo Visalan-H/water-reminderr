@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -14,94 +15,51 @@ import 'package:overlay_pop_up/overlay_pop_up.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const String _backendUrl = 'https://6pwng25f-3000.inc1.devtunnels.ms';
+const String _backendUrl = 'https://water-reminderr.vercel.app';
 const String _registerSecret =
     '3d0b192504daa3643a1a7ebc85c21053420bb8f2fa09bbc5ddfc6cb709d832c597777c91dd4d3ed588232a75df77c3b4404c01b59b88a8f057fa10b9a73b0a13';
 const String _overlayIcon = 'ic_launcher';
 const String _overlayTitle = 'Water Reminder';
-const String _appPackage =
-    'com.example.waterreminder'; // ← update if your package name differs
+const String _appPackage = 'com.example.waterreminder';
 const int _matchParent = -1;
+const String _backgroundActivityDoneKey = 'backgroundActivityDone';
+const String _legacyBatteryPermissionDoneKey = 'batteryPermissionDone';
 
-// ─── Local notifications ───────────────────────────────────────────────────
+// ─── Local notifications ────────────────────────────────────────────────
 final FlutterLocalNotificationsPlugin _localNotifications =
     FlutterLocalNotificationsPlugin();
 
 Future<void> _initLocalNotifications() async {
-  const AndroidInitializationSettings androidSettings =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
-
   await _localNotifications.initialize(
-    const InitializationSettings(android: androidSettings),
-    // Fires when user taps a local notification while app is alive (foreground
-    // or background-but-not-killed). For the terminated-state tap we use
-    // getNotificationAppLaunchDetails() inside _init().
+    const InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher')),
     onDidReceiveNotificationResponse: (_) async {
-      if (!await OverlayPopUp.isActive()) {
-        await _showReminderOverlay();
-      }
+      if (!await OverlayPopUp.isActive()) await _showReminderOverlay();
     },
   );
-
-  const AndroidNotificationChannel channel = AndroidNotificationChannel(
-    'water_reminder',
-    'Water Reminder',
-    description: 'Water drinking reminders',
-    importance: Importance.max,
-    enableVibration: true,
-    playSound: true,
-    showBadge: true,
-  );
-
   await _localNotifications
       .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>()
-      ?.createNotificationChannel(channel);
-}
-
-Future<void> _showFullScreenNotification({
-  String title = '💧 Drink Water!',
-  String body = 'Your body needs hydration.',
-}) async {
-  const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-    'water_reminder',
-    'Water Reminder',
-    channelDescription: 'Water drinking reminders',
-    importance: Importance.max,
-    priority: Priority.max,
-    fullScreenIntent: true,
-    visibility: NotificationVisibility.public,
-    enableVibration: true,
-    playSound: true,
-    autoCancel: true,
-  );
-
-  await _localNotifications.show(
-    0,
-    title,
-    body,
-    const NotificationDetails(android: androidDetails),
-  );
+      ?.createNotificationChannel(const AndroidNotificationChannel(
+        'water_reminder',
+        'Water Reminder',
+        description: 'Water drinking reminders',
+        importance: Importance.max,
+        enableVibration: true,
+        playSound: true,
+        showBadge: true,
+      ));
 }
 
 Future<void> _requestNotificationPermissions() async {
   await FirebaseMessaging.instance.requestPermission();
   await Permission.notification.request();
-
   if (!Platform.isAndroid) return;
-
-  final androidLocalNotifications =
-      _localNotifications.resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>();
-  if (androidLocalNotifications == null) return;
-
-  // Newer Android versions may gate full-screen notifications separately.
+  final impl = _localNotifications.resolvePlatformSpecificImplementation<
+      AndroidFlutterLocalNotificationsPlugin>();
   try {
-    await (androidLocalNotifications as dynamic)
-        .requestFullScreenIntentPermission();
-  } catch (_) {
-    // Older plugin/API levels may not expose this call.
-  }
+    await (impl as dynamic).requestFullScreenIntentPermission();
+  } catch (_) {}
 }
 
 Future<void> _showReminderOverlay() async {
@@ -115,23 +73,19 @@ Future<void> _showReminderOverlay() async {
   );
 }
 
+// ─── Hydration storage ───────────────────────────────────────────────────
 const String _hydrationLevelKey = 'hydrationLevel';
 const String _hydrationUpdatedAtKey = 'hydrationUpdatedAt';
-const double _drinkHydrationBoost = 0.22;
-const double _dismissHydrationDrop = 0.08;
+const double _drinkBoost = 0.22;
+const double _dismissDrop = 0.08;
 
-double _normalizeHydration(double value) {
-  return value.clamp(0.0, 1.0).toDouble();
-}
+double _clamp01(double v) => v.clamp(0.0, 1.0);
 
-Future<double> _readHydrationValue() async {
+Future<double> _readHydration() async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
-  final savedHydration = prefs.getDouble(_hydrationLevelKey);
-  if (savedHydration != null) {
-    return _normalizeHydration(savedHydration);
-  }
-
+  final saved = prefs.getDouble(_hydrationLevelKey);
+  if (saved != null) return _clamp01(saved);
   final now = DateTime.now().millisecondsSinceEpoch;
   await prefs.setDouble(_hydrationLevelKey, 1.0);
   await prefs.setInt(_hydrationUpdatedAtKey, now);
@@ -139,80 +93,54 @@ Future<double> _readHydrationValue() async {
   return 1.0;
 }
 
-Future<double> _changeHydration(double delta,
-    {bool markAsDrink = false}) async {
+Future<double> _changeHydration(double delta, {bool markDrink = false}) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.reload();
-  final currentHydration = _normalizeHydration(
-    prefs.getDouble(_hydrationLevelKey) ?? 1.0,
-  );
-  final updatedHydration = _normalizeHydration(currentHydration + delta);
+  final current = _clamp01(prefs.getDouble(_hydrationLevelKey) ?? 1.0);
+  final updated = _clamp01(current + delta);
   final now = DateTime.now().millisecondsSinceEpoch;
-
-  await prefs.setDouble(_hydrationLevelKey, updatedHydration);
+  await prefs.setDouble(_hydrationLevelKey, updated);
   await prefs.setInt(_hydrationUpdatedAtKey, now);
-  if (markAsDrink) {
-    await prefs.setInt('lastDrinkTime', now);
-  }
-
-  return updatedHydration;
+  if (markDrink) await prefs.setInt('lastDrinkTime', now);
+  return updated;
 }
 
-Future<double> _recordDrinkAction() async {
-  return _changeHydration(_drinkHydrationBoost, markAsDrink: true);
-}
+Future<double> _drink() => _changeHydration(_drinkBoost, markDrink: true);
+Future<double> _dismiss() => _changeHydration(-_dismissDrop);
 
-Future<double> _recordDismissAction() async {
-  return _changeHydration(-_dismissHydrationDrop);
-}
-
-// ─── FCM background handler ────────────────────────────────────────────────
-// Runs in a separate isolate when the app is background or killed.
-// We first try to show the overlay directly. If that fails on a device/ROM,
-// we fall back to a high-priority full-screen local notification.
+// ─── FCM background handler ─────────────────────────────────────────────
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
-
-  if (message.data['type'] == 'water_reminder') {
-    final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-        FlutterLocalNotificationsPlugin();
-
-    const AndroidInitializationSettings androidSettings =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-    await flutterLocalNotificationsPlugin.initialize(
-      const InitializationSettings(android: androidSettings),
-    );
-
-    const AndroidNotificationChannel channel = AndroidNotificationChannel(
-      'water_reminder',
-      'Water Reminder',
-      description: 'Water drinking reminders',
-      importance: Importance.max,
-      enableVibration: true,
-      playSound: true,
-      showBadge: true,
-    );
-    await flutterLocalNotificationsPlugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(channel);
-
-    try {
-      final overlayPermission = await OverlayPopUp.checkPermission();
-      if (overlayPermission) {
-        final isActive = await OverlayPopUp.isActive();
-        if (!isActive) {
-          await _showReminderOverlay();
-          return;
-        }
-      }
-    } catch (_) {
-      // Fall back to notification path below.
+  if (message.data['type'] != 'water_reminder') return;
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.initialize(const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher')));
+  await plugin
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(const AndroidNotificationChannel(
+        'water_reminder',
+        'Water Reminder',
+        description: 'Water drinking reminders',
+        importance: Importance.max,
+        enableVibration: true,
+        playSound: true,
+        showBadge: true,
+      ));
+  try {
+    if (await OverlayPopUp.checkPermission() &&
+        !await OverlayPopUp.isActive()) {
+      await _showReminderOverlay();
+      return;
     }
-
-    const AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
+  } catch (_) {}
+  await plugin.show(
+    0,
+    message.data['title'] ?? '💧 Drink Water!',
+    message.data['body'] ?? 'Your body needs hydration.',
+    const NotificationDetails(
+        android: AndroidNotificationDetails(
       'water_reminder',
       'Water Reminder',
       channelDescription: 'Water drinking reminders',
@@ -223,253 +151,438 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       enableVibration: true,
       playSound: true,
       autoCancel: true,
-    );
+    )),
+  );
+}
 
-    await flutterLocalNotificationsPlugin.show(
-      0,
-      message.data['title'] ?? '💧 Drink Water!',
-      message.data['body'] ?? 'Your body needs hydration.',
-      const NotificationDetails(android: androidDetails),
+// ─────────────────────────────────────────────────────────────────────────
+//  HYDRATION THEME
+//  Everything — bg, surface, text, borders, blobs — derived from hydration.
+// ─────────────────────────────────────────────────────────────────────────
+class HydrationTheme {
+  final double h;
+  final Color bg;
+  final Color surface;
+  final Color surfaceAlt;
+  final Color textPrimary;
+  final Color textSecondary;
+  final Color textMuted;
+  final Color accent;
+  final Color border;
+  final Color blobA;
+  final Color blobB;
+
+  const HydrationTheme._({
+    required this.h,
+    required this.bg,
+    required this.surface,
+    required this.surfaceAlt,
+    required this.textPrimary,
+    required this.textSecondary,
+    required this.textMuted,
+    required this.accent,
+    required this.border,
+    required this.blobA,
+    required this.blobB,
+  });
+
+  // ─── PALETTES ─────────────────────────────────────────
+
+  static const _dry = _Palette(
+    bg: Color(0xFF0F0202),
+    surface: Color(0xFF1C0505),
+    surfaceAlt: Color(0xFF2A0808),
+    textPrimary: Color(0xFFFFE4E4),
+    textSecondary: Color(0xFFCC6666),
+    textMuted: Color(0xFFC86464),
+    accent: Color(0xFFFF3B30),
+    border: Color(0xFF381412),
+    blobA: Color(0xFF41100F),
+    blobB: Color(0xFF240A09),
+  );
+
+  static const _mid = _Palette(
+    bg: Color(0xFFFFF6ED),
+    surface: Color(0xFFFFFFFF),
+    surfaceAlt: Color(0xFFFDE8D6),
+    textPrimary: Color(0xFF4A2B12),
+    textSecondary: Color(0xFF8C5F36),
+    textMuted: Color(0xFFB5845C),
+    accent: Color(0xFFFF8C00),
+    border: Color(0xFFF5D6B8),
+    blobA: Color(0xFFFDE1C8),
+    blobB: Color(0xFFFCECDD),
+  );
+
+  static const _hydrated = _Palette(
+    bg: Color(0xFFF0F6FF),
+    surface: Color(0xFFFFFFFF),
+    surfaceAlt: Color(0xFFE8F0FE),
+    textPrimary: Color(0xFF0D1E3A),
+    textSecondary: Color(0xFF4D6FA8),
+    textMuted: Color(0xFF3B5C8A),
+    accent: Color(0xFF2563EB),
+    border: Color(0xFFD4E2F9),
+    blobA: Color(0xFFCDE0FD),
+    blobB: Color(0xFFE6EFFF),
+  );
+
+  // ─── FACTORY (HARD SWITCH — NO GREY EVER) ─────────────
+
+  factory HydrationTheme.of(double hydration) {
+    final t = hydration.clamp(0.0, 1.0);
+
+    late _Palette p;
+
+    if (t < 0.30) {
+      p = _dry;
+    } else if (t < 0.65) {
+      p = _mid;
+    } else {
+      p = _hydrated;
+    }
+
+    return HydrationTheme._(
+      h: t,
+      bg: p.bg,
+      surface: p.surface,
+      surfaceAlt: p.surfaceAlt,
+      textPrimary: p.textPrimary,
+      textSecondary: p.textSecondary,
+      textMuted: p.textMuted,
+      accent: p.accent,
+      border: p.border,
+      blobA: p.blobA,
+      blobB: p.blobB,
+    );
+  }
+
+  // ─── DERIVED COLORS (unchanged) ───────────────────────
+
+  Color get surfaceBorder => (h < 0.5)
+      ? Color.lerp(const Color(0xFF501916), const Color(0xFFF0CBAB), h * 2.0)!
+      : Color.lerp(
+          const Color(0xFFF0CBAB),
+          const Color(0xFFC3D6F7),
+          (h - 0.5) * 2.0,
+        )!;
+
+  Color get chipSelected => (h < 0.5)
+      ? Color.lerp(const Color(0xFF3B1210), const Color(0xFFFFF0E0), h * 2.0)!
+      : Color.lerp(
+          const Color(0xFFFFF0E0),
+          const Color(0xFFE2EAF8),
+          (h - 0.5) * 2.0,
+        )!;
+
+  Color get chipBorderSelected => (h < 0.5)
+      ? Color.lerp(const Color(0xFF75241E), const Color(0xFFFFC080), h * 2.0)!
+      : Color.lerp(
+          const Color(0xFFFFC080),
+          const Color(0xFFAABCED),
+          (h - 0.5) * 2.0,
+        )!;
+}
+
+// ─── INTERNAL PALETTE ───────────────────────────────────
+
+class _Palette {
+  final Color bg, surface, surfaceAlt;
+  final Color textPrimary, textSecondary, textMuted;
+  final Color accent, border, blobA, blobB;
+
+  const _Palette({
+    required this.bg,
+    required this.surface,
+    required this.surfaceAlt,
+    required this.textPrimary,
+    required this.textSecondary,
+    required this.textMuted,
+    required this.accent,
+    required this.border,
+    required this.blobA,
+    required this.blobB,
+  });
+}
+
+// ─── Flower states ───────────────────────────────────────────────────────
+class FlowerState {
+  final String emoji;
+  final String name;
+  final String message;
+  const FlowerState(this.emoji, this.name, this.message);
+
+  static FlowerState of(double h) {
+    if (h >= 0.80)
+      return const FlowerState(
+          '🌸', 'Flourishing', 'In full bloom — you\'re doing great.');
+    if (h >= 0.60)
+      return const FlowerState(
+          '🌺', 'Blooming', 'Looking beautiful, keep it up.');
+    if (h >= 0.40)
+      return const FlowerState('🌷', 'Growing', 'Needs a little more water.');
+    if (h >= 0.20)
+      return const FlowerState(
+          '🌱', 'Struggling', 'Getting dry — drink water soon.');
+    return const FlowerState(
+        '🥀', 'Wilting', 'Urgent. Your flower is dying of thirst.');
+  }
+}
+
+// ─── Arc painter ─────────────────────────────────────────────────────────
+class _ArcPainter extends CustomPainter {
+  final double progress;
+  final Color color;
+  final Color trackColor;
+  _ArcPainter(
+      {required this.progress, required this.color, required this.trackColor});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = Offset(size.width / 2, size.height / 2);
+    final r = size.width / 2 - 7;
+    final rect = Rect.fromCircle(center: c, radius: r);
+
+    canvas.drawCircle(
+        c,
+        r,
+        Paint()
+          ..color = trackColor
+          ..strokeWidth = 2.5
+          ..style = PaintingStyle.stroke);
+
+    if (progress < 0.01) return;
+
+    final sweep = 2 * math.pi * progress;
+
+    canvas.drawArc(
+        rect,
+        -math.pi / 2,
+        sweep,
+        false,
+        Paint()
+          ..color = color.withOpacity(0.22)
+          ..strokeWidth = 14
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round);
+
+    canvas.drawArc(
+        rect,
+        -math.pi / 2,
+        sweep,
+        false,
+        Paint()
+          ..color = color
+          ..strokeWidth = 3.5
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round);
+
+    final a = -math.pi / 2 + sweep;
+    final dot = Offset(c.dx + r * math.cos(a), c.dy + r * math.sin(a));
+    canvas.drawCircle(dot, 6, Paint()..color = color);
+    canvas.drawCircle(dot, 2.8, Paint()..color = Colors.white.withOpacity(0.9));
+  }
+
+  @override
+  bool shouldRepaint(_ArcPainter o) =>
+      o.progress != progress || o.color != color || o.trackColor != trackColor;
+}
+
+// ─── Flower emoji ─────────────────────────────────────────────────────────
+class _FlowerEmoji extends StatelessWidget {
+  final double hydration;
+  final double size;
+  const _FlowerEmoji({required this.hydration, required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    final emoji = FlowerState.of(hydration).emoji;
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 650),
+      transitionBuilder: (child, anim) => FadeTransition(
+        opacity: anim,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.70, end: 1.0).animate(
+              CurvedAnimation(parent: anim, curve: Curves.easeOutBack)),
+          child: child,
+        ),
+      ),
+      child:
+          Text(emoji, key: ValueKey(emoji), style: TextStyle(fontSize: size)),
     );
   }
 }
 
-// ─── Overlay screen ────────────────────────────────────────────────────────
+// ─── Hydration hero ───────────────────────────────────────────────────────
+class HydrationHero extends StatelessWidget {
+  final double hydration;
+  final HydrationTheme theme;
+  const HydrationHero(
+      {super.key, required this.hydration, required this.theme});
+
+  @override
+  Widget build(BuildContext context) {
+    final percent = (hydration * 100).round();
+
+    return TweenAnimationBuilder<double>(
+      tween: Tween(end: hydration),
+      duration: const Duration(milliseconds: 1100),
+      curve: Curves.easeOutCubic,
+      builder: (_, animH, __) {
+        final animTheme = HydrationTheme.of(animH);
+        final glowOpacity = 0.08 + animH * 0.22;
+        final glowBlur = 18.0 + animH * 54.0;
+        final emojiSize = 58.0 + animH * 44.0;
+
+        return Column(children: [
+          SizedBox(
+            width: 260,
+            height: 260,
+            child: Stack(alignment: Alignment.center, children: [
+              CustomPaint(
+                size: const Size(260, 260),
+                painter: _ArcPainter(
+                  progress: animH,
+                  color: animTheme.accent,
+                  trackColor: animTheme.surfaceAlt,
+                ),
+              ),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 900),
+                curve: Curves.easeOutCubic,
+                width: 212,
+                height: 212,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: animTheme.surface,
+                  border: Border.all(
+                      color: animTheme.accent.withOpacity(0.18), width: 1.5),
+                  boxShadow: [
+                    BoxShadow(
+                      color: animTheme.accent.withOpacity(glowOpacity),
+                      blurRadius: glowBlur,
+                    ),
+                    BoxShadow(
+                      color:
+                          Colors.black.withOpacity(0.10 + (1 - animH) * 0.12),
+                      blurRadius: 20,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Center(
+                    child: _FlowerEmoji(hydration: animH, size: emojiSize)),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 30),
+          TweenAnimationBuilder<Color?>(
+            tween: ColorTween(end: theme.accent),
+            duration: const Duration(milliseconds: 800),
+            builder: (_, c, __) => Text(
+              '$percent%',
+              style: TextStyle(
+                fontSize: 76,
+                fontWeight: FontWeight.w900,
+                color: c ?? theme.accent,
+                letterSpacing: -6,
+                height: 1.0,
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          TweenAnimationBuilder<Color?>(
+            tween: ColorTween(end: theme.accent.withOpacity(0.65)),
+            duration: const Duration(milliseconds: 800),
+            builder: (_, c, __) => Text(
+              FlowerState.of(hydration).name.toUpperCase(),
+              style: TextStyle(
+                color: c ?? theme.textSecondary,
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 3.5,
+              ),
+            ),
+          ),
+        ]);
+      },
+    );
+  }
+}
+
+// ─── Full-screen background ───────────────────────────────────────────────
+class _Bg extends StatelessWidget {
+  final HydrationTheme theme;
+  const _Bg({required this.theme});
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: Stack(children: [
+        // Base color — animated by parent rebuild
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 900),
+          curve: Curves.easeOutCubic,
+          color: theme.bg,
+        ),
+        // Top-right bloom
+        Positioned(
+          top: -80,
+          right: -80,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 900),
+            curve: Curves.easeOutCubic,
+            width: 340,
+            height: 340,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: theme.blobA,
+                  blurRadius: 140,
+                  spreadRadius: 60,
+                )
+              ],
+            ),
+          ),
+        ),
+        // Bottom-left bloom
+        Positioned(
+          bottom: 60,
+          left: -110,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 900),
+            curve: Curves.easeOutCubic,
+            width: 270,
+            height: 270,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: theme.blobB,
+                  blurRadius: 110,
+                  spreadRadius: 40,
+                )
+              ],
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+// ─── Overlay entry point ─────────────────────────────────────────────────
 @pragma('vm:entry-point')
 void overlayPopUp() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(MaterialApp(
+  runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: appTheme,
-    home: const OverlayScreen(),
+    home: OverlayScreen(),
   ));
 }
 
-class AppColors {
-  static const Color background = Color(0xFFEAF3FF);
-  static const Color surface = Color(0xFFFFFFFF);
-  static const Color primary = Color(0xFF1463D8);
-  static const Color secondary = Color(0xFF9DC8FF);
-  static const Color textPrimary = Color(0xFF0E2A4A);
-  static const Color textSecondary = Color(0xFF4F6E90);
-  static const Color error = Color(0xFFD15050);
-  static const Color panelBlue = Color(0xFFD9E9FF);
-}
-
-final ThemeData appTheme = ThemeData(
-  scaffoldBackgroundColor: AppColors.background,
-  primaryColor: AppColors.primary,
-  colorScheme: const ColorScheme.light(
-    primary: AppColors.primary,
-    secondary: AppColors.secondary,
-    surface: AppColors.surface,
-    error: AppColors.error,
-  ),
-  appBarTheme: const AppBarTheme(
-    backgroundColor: AppColors.primary,
-    foregroundColor: Colors.white,
-    elevation: 0,
-    centerTitle: true,
-  ),
-  chipTheme: ChipThemeData(
-    backgroundColor: Colors.white,
-    selectedColor: AppColors.primary.withOpacity(0.14),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-    side: BorderSide(color: AppColors.secondary.withOpacity(0.85)),
-    labelStyle: const TextStyle(
-      color: AppColors.textPrimary,
-      fontWeight: FontWeight.w500,
-    ),
-    secondaryLabelStyle: const TextStyle(
-      color: AppColors.primary,
-      fontWeight: FontWeight.w600,
-    ),
-  ),
-  textTheme: const TextTheme(
-    headlineMedium: TextStyle(
-        color: AppColors.textPrimary,
-        fontSize: 28,
-        fontWeight: FontWeight.w400,
-        letterSpacing: -0.5),
-    titleLarge: TextStyle(
-        color: AppColors.textPrimary,
-        fontSize: 20,
-        fontWeight: FontWeight.w600),
-    bodyLarge: TextStyle(
-        color: AppColors.textPrimary,
-        fontSize: 16,
-        fontWeight: FontWeight.w400),
-    bodyMedium: TextStyle(
-        color: AppColors.textSecondary,
-        fontSize: 14,
-        fontWeight: FontWeight.w400),
-  ),
-  elevatedButtonTheme: ElevatedButtonThemeData(
-    style: ElevatedButton.styleFrom(
-      backgroundColor: AppColors.primary,
-      foregroundColor: Colors.white,
-      elevation: 0,
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-      textStyle: const TextStyle(
-          fontSize: 16, fontWeight: FontWeight.w500, letterSpacing: 0.5),
-    ),
-  ),
-);
-
-// ─── Widgets ───────────────────────────────────────────────────────────────
-class FlowerWidget extends StatelessWidget {
-  final double hydration;
-
-  const FlowerWidget({super.key, required this.hydration});
-
-  @override
-  Widget build(BuildContext context) {
-    String emoji = '🥀';
-    double size = 92;
-    double opacity = 0.72;
-
-    if (hydration >= 0.85) {
-      emoji = '🌸';
-      size = 150;
-      opacity = 1.0;
-    } else if (hydration >= 0.65) {
-      emoji = '🌺';
-      size = 138;
-      opacity = 0.98;
-    } else if (hydration >= 0.45) {
-      emoji = '🌷';
-      size = 120;
-      opacity = 0.9;
-    } else if (hydration >= 0.25) {
-      emoji = '🌼';
-      size = 100;
-      opacity = 0.82;
-    }
-
-    return AnimatedContainer(
-      duration: const Duration(seconds: 2),
-      curve: Curves.easeInOut,
-      height: 200,
-      alignment: Alignment.center,
-      child: Container(
-        width: 210,
-        height: 210,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const RadialGradient(
-            colors: [Colors.white, AppColors.panelBlue],
-            radius: 0.88,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: AppColors.primary.withOpacity(0.16),
-              blurRadius: 22,
-              offset: const Offset(0, 10),
-            ),
-          ],
-        ),
-        child: Center(
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 800),
-            transitionBuilder: (child, animation) => FadeTransition(
-              opacity: animation,
-              child: ScaleTransition(scale: animation, child: child),
-            ),
-            child: Text(
-              emoji,
-              key: ValueKey(emoji),
-              style: TextStyle(
-                  fontSize: size,
-                  color: AppColors.primary.withOpacity(opacity)),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class StatusCard extends StatelessWidget {
-  final double hydration;
-
-  const StatusCard({super.key, required this.hydration});
-
-  @override
-  Widget build(BuildContext context) {
-    final hydrationPercent = (hydration.clamp(0.0, 1.0) * 100).round();
-
-    String title = "Your plant is dry.";
-    String subtitle = "It needs multiple drinks to recover.";
-
-    if (hydration >= 0.85) {
-      title = "Fully blooming.";
-      subtitle = "Excellent hydration and growth.";
-    } else if (hydration >= 0.65) {
-      title = "Healthy bloom.";
-      subtitle = "Keep drinking regularly.";
-    } else if (hydration >= 0.45) {
-      title = "Stable flower.";
-      subtitle = "It is okay, but needs more water soon.";
-    } else if (hydration >= 0.25) {
-      title = "Wilting started.";
-      subtitle = "Dismissed reminders are drying the flower.";
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.03),
-            blurRadius: 20,
-            offset: const Offset(0, 10),
-          )
-        ],
-      ),
-      child: Column(
-        children: [
-          Text(title, style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 8),
-          Text(subtitle, style: Theme.of(context).textTheme.bodyMedium),
-          const SizedBox(height: 14),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: LinearProgressIndicator(
-              value: hydration.clamp(0.0, 1.0),
-              minHeight: 10,
-              backgroundColor: AppColors.panelBlue,
-              color: AppColors.primary,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '$hydrationPercent% hydrated',
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class PrimaryButton extends StatelessWidget {
-  final String text;
-  final VoidCallback onPressed;
-
-  const PrimaryButton({super.key, required this.text, required this.onPressed});
-
-  @override
-  Widget build(BuildContext context) {
-    return ElevatedButton(
-      onPressed: onPressed,
-      child: Text(text),
-    );
-  }
-}
-
+// ─── Overlay screen ───────────────────────────────────────────────────────
 class OverlayScreen extends StatefulWidget {
   const OverlayScreen({super.key});
   @override
@@ -477,110 +590,185 @@ class OverlayScreen extends StatefulWidget {
 }
 
 class _OverlayScreenState extends State<OverlayScreen> {
-  double _overlayHydration = 1.0;
+  double _hydration = 1.0;
 
   @override
   void initState() {
     super.initState();
     OverlayPopUp.initializeOverlayHandler();
-    unawaited(_loadOverlayHydration());
+    unawaited(_load());
   }
 
-  Future<void> _loadOverlayHydration() async {
-    final hydration = await _readHydrationValue();
+  Future<void> _load() async {
+    final h = await _readHydration();
     if (!mounted) return;
-    setState(() {
-      _overlayHydration = hydration;
-    });
+    setState(() => _hydration = h);
   }
 
   @override
   Widget build(BuildContext context) {
+    final bottom = MediaQuery.of(context).padding.bottom;
+    final theme = HydrationTheme.of(_hydration);
+    final state = FlowerState.of(_hydration);
+
     return Scaffold(
-      backgroundColor: const Color(0xFFEFF6FF),
-      body: DecoratedBox(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFFCCE3FF), Color(0xFFEFF6FF)],
-          ),
-        ),
-        child: SafeArea(
+      backgroundColor: Colors.transparent,
+      body: Stack(children: [
+        // Full background — uses same _Bg widget, fully opaque
+        _Bg(theme: theme),
+
+        SafeArea(
+          bottom: false,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(28, 24, 28, 22),
+            padding: EdgeInsets.fromLTRB(24, 0, 24, bottom + 24),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const SizedBox(height: 4),
-                Column(
-                  children: [
-                    FlowerWidget(hydration: _overlayHydration),
-                    const SizedBox(height: 20),
-                    Text(
-                      'Your flower needs water.',
-                      style: Theme.of(context).textTheme.headlineMedium,
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      'Drink now to bring it back to life.',
-                      style: Theme.of(context).textTheme.bodyLarge,
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                ),
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(
-                      width: double.infinity,
-                      child: PrimaryButton(
-                        onPressed: () async {
-                          final updatedHydration = await _recordDrinkAction();
-                          if (mounted) {
-                            setState(() {
-                              _overlayHydration = updatedHydration;
-                            });
-                          }
-                          await OverlayPopUp.closeOverlay();
-                        },
-                        text: 'I drank water',
+                const Spacer(),
+
+                Center(
+                    child: HydrationHero(hydration: _hydration, theme: theme)),
+                const SizedBox(height: 24),
+
+                // State card
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 500),
+                  padding: const EdgeInsets.fromLTRB(18, 15, 18, 15),
+                  decoration: BoxDecoration(
+                    color: theme.surface,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: theme.border, width: 1),
+                    boxShadow: [
+                      BoxShadow(
+                        color: theme.accent.withOpacity(0.12),
+                        blurRadius: 16,
+                        offset: const Offset(0, 4),
+                      )
+                    ],
+                  ),
+                  child: Row(children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 500),
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: theme.accent.withOpacity(0.12),
+                      ),
+                      child: Center(
+                        child: Text(state.emoji,
+                            style: const TextStyle(fontSize: 22)),
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    TextButton(
+                    const SizedBox(width: 14),
+                    Expanded(
+                        child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 350),
+                          transitionBuilder: (child, animation) =>
+                              FadeTransition(
+                            opacity: animation,
+                            child: SlideTransition(
+                              position: Tween<Offset>(
+                                begin: const Offset(0.0, 0.2),
+                                end: Offset.zero,
+                              ).animate(animation),
+                              child: child,
+                            ),
+                          ),
+                          child: Text(state.name,
+                              key: ValueKey(state.name),
+                              style: TextStyle(
+                                color: theme.accent,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: -0.2,
+                              )),
+                        ),
+                        const SizedBox(height: 2),
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 350),
+                          transitionBuilder: (child, animation) =>
+                              FadeTransition(
+                            opacity: animation,
+                            child: SlideTransition(
+                              position: Tween<Offset>(
+                                begin: const Offset(0.0, 0.2),
+                                end: Offset.zero,
+                              ).animate(animation),
+                              child: child,
+                            ),
+                          ),
+                          child: Text(state.message,
+                              key: ValueKey(state.message),
+                              style: TextStyle(
+                                color: theme.textSecondary,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              )),
+                        ),
+                      ],
+                    )),
+                  ]),
+                ),
+
+                const Spacer(),
+
+                // CTA
+                SizedBox(
+                  height: 60,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 500),
+                    child: ElevatedButton.icon(
                       onPressed: () async {
-                        final updatedHydration = await _recordDismissAction();
-                        if (mounted) {
-                          setState(() {
-                            _overlayHydration = updatedHydration;
-                          });
-                        }
+                        final h = await _drink();
+                        if (mounted) setState(() => _hydration = h);
                         await OverlayPopUp.closeOverlay();
                       },
-                      child: const Text(
-                        'Dismiss',
-                        style: TextStyle(color: AppColors.textSecondary),
+                      icon: const Icon(Icons.water_drop_rounded, size: 20),
+                      label: const Text('I watered the flower!'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: theme.accent,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        textStyle: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.3),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(20)),
                       ),
                     ),
-                  ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextButton(
+                  onPressed: () async {
+                    final h = await _dismiss();
+                    if (mounted) setState(() => _hydration = h);
+                    await OverlayPopUp.closeOverlay();
+                  },
+                  style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14)),
+                  child: Text('Not now',
+                      style: TextStyle(
+                        color: theme.textSecondary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      )),
                 ),
               ],
             ),
           ),
         ),
-      ),
+      ]),
     );
   }
 }
 
-// ─── MIUI background popup permission ─────────────────────────────────────
-// On Xiaomi/Redmi/POCO, SYSTEM_ALERT_WINDOW alone is not enough. MIUI adds a
-// second separate gate: "Display pop-up windows while running in background".
-// Without it, WindowManager rejects the overlay view immediately after creation
-// — which is exactly what the "assignParent to null" log warning means.
-// This intent opens the MIUI permission editor directly on the right page.
+// ─── MIUI helpers ────────────────────────────────────────────────────────
 bool _isXiaomiBrand(String brand) {
   final b = brand.toLowerCase();
   return b.contains('xiaomi') || b.contains('redmi') || b.contains('poco');
@@ -588,138 +776,43 @@ bool _isXiaomiBrand(String brand) {
 
 Future<void> _openMiuiPermissionEditor() async {
   try {
-    final intent = AndroidIntent(
+    await AndroidIntent(
       action: 'miui.intent.action.APP_PERM_EDITOR',
       package: 'com.miui.securitycenter',
       componentName:
           'com.miui.permcenter.permissions.PermissionsEditorActivity',
       arguments: {'extra_pkgname': _appPackage},
-    );
-    await intent.launch();
+    ).launch();
   } catch (_) {
-    // Fallback: older MIUI versions use a different activity name
     try {
-      final intent = AndroidIntent(
+      await AndroidIntent(
         action: 'miui.intent.action.APP_PERM_EDITOR',
         package: 'com.miui.securitycenter',
         componentName:
             'com.miui.permcenter.permissions.AppPermissionsEditorActivity',
         arguments: {'extra_pkgname': _appPackage},
-      );
-      await intent.launch();
+      ).launch();
     } catch (_) {
-      // If both fail the caller shows a fallback message.
       rethrow;
     }
-  }
-}
-
-// ─── Brand-specific battery steps ─────────────────────────────────────────
-Map<String, List<String>> _getBrandSteps(String brand) {
-  final b = brand.toLowerCase();
-  if (b.contains('xiaomi') || b.contains('redmi') || b.contains('poco')) {
-    return {
-      // Step 0 is the critical MIUI-specific overlay permission — tap the button
-      // above first, then manually confirm "Display pop-up windows while running
-      // in background" is ON in the page that opens.
-      '0. ⚠️ MIUI pop-up permission (CRITICAL)': [
-        'Tap "Grant MIUI pop-up permission" button above',
-        'In the page that opens, find "Display pop-up windows while running in background" → turn it ON',
-        'Without this, the overlay will always silently fail on Xiaomi/Redmi/POCO',
-      ],
-      '1. Autostart': [
-        'Settings → Apps → Manage apps → Water Reminder → Autostart → ON',
-      ],
-      '2. Battery': [
-        'Settings → Battery → Battery saver → App battery saver → Water Reminder → No restrictions',
-      ],
-      '3. Lock in recents': [
-        'Open recent apps → swipe down on Water Reminder → tap the 🔒 lock icon',
-      ],
-    };
-  } else if (b.contains('huawei') || b.contains('honor')) {
-    return {
-      '1. App launch': [
-        'Settings → Battery → App launch → Water Reminder → Disable "Manage automatically" → Enable Auto-launch, Secondary launch, Run in background',
-      ],
-    };
-  } else if (b.contains('samsung')) {
-    return {
-      '1. Never sleeping': [
-        'Settings → Battery and device care → Battery → Background usage limits → Never sleeping apps → Add Water Reminder',
-      ],
-      '2. Battery': [
-        'Settings → Apps → Water Reminder → Battery → Unrestricted',
-      ],
-    };
-  } else if (b.contains('oneplus') || b.contains('oppo')) {
-    return {
-      '1. Battery': [
-        'Settings → Battery → Battery optimization → Water Reminder → Don\'t optimize',
-      ],
-      '2. Auto-launch': [
-        'Settings → Apps → Auto-launch → Water Reminder → Allow',
-      ],
-    };
-  } else if (b.contains('vivo')) {
-    return {
-      '1. Background': [
-        'Settings → Battery → Background power consumption → Water Reminder → No restrictions',
-      ],
-      '2. Auto-start': [
-        'Settings → More settings → Application permissions → Autostart → Water Reminder → ON',
-      ],
-    };
-  } else if (b.contains('realme')) {
-    return {
-      '1. Battery': [
-        'Settings → Battery → Battery optimization → Water Reminder → Don\'t optimize',
-      ],
-      '2. Auto-start': [
-        'Settings → Apps → Manage apps → Water Reminder → Auto-start → ON',
-      ],
-    };
-  } else {
-    return {
-      '1. Battery': [
-        'Settings → Apps → Water Reminder → Battery → Unrestricted',
-      ],
-    };
   }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
   try {
-    // 🔴 MUST be first
     await Firebase.initializeApp();
-
-    // 🔴 MUST be registered BEFORE runApp and as early as possible
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
-
-    // 🔴 Prevent OS from auto-showing notifications (gives you full control)
     await FirebaseMessaging.instance
         .setForegroundNotificationPresentationOptions(
-      alert: false,
-      badge: false,
-      sound: false,
-    );
-
-    // 🔴 Init local notifications once (main isolate only)
+            alert: false, badge: false, sound: false);
     await _initLocalNotifications();
-
-    runApp(MaterialApp(theme: appTheme, home: const HomePage()));
+    runApp(const MaterialApp(home: HomePage()));
   } catch (e) {
     runApp(MaterialApp(
       home: Scaffold(
-        body: Center(
-          child: Text(
-            'Init error: $e',
-            style: const TextStyle(color: Colors.red),
-          ),
-        ),
+        body: Center(child: Text('Init error: $e')),
       ),
     ));
   }
@@ -733,75 +826,44 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
-  static const List<int> _intervalOptions = [
-    10,
-    1,
-    30,
-    45,
-    60,
-    90,
-    120,
-    180,
-    240
-  ];
+  static const List<int> _intervals = [10, 30, 45, 60, 90, 120, 180, 240];
 
   int _intervalMinutes = 60;
   bool _registered = false;
   bool _busy = false;
   bool _overlayPermissionDone = false;
-  bool _batteryPermissionDone = false;
-  String _status = 'Setting up...';
+  bool _batteryLimitDone = false;
+  bool _backgroundActivityDone = false;
+  String _status = 'Waking up...';
   String _brand = '';
   double _hydration = 1.0;
-  Timer? _hydrationTicker;
+  Timer? _ticker;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_init());
-    _hydrationTicker = Timer.periodic(
-      const Duration(seconds: 5),
-      (_) => unawaited(_updateHydrationFromClock()),
-    );
+    _ticker = Timer.periodic(
+        const Duration(seconds: 5), (_) => unawaited(_pullHydration()));
 
-    // ── Foreground FCM ──────────────────────────────────────────────────────
-    // App is open and visible — show overlay directly.
-    FirebaseMessaging.onMessage.listen((message) async {
-      if (message.data['type'] == 'water_reminder') {
-        if (!await OverlayPopUp.isActive()) {
-          await _showReminderOverlay();
-        }
-      }
+    FirebaseMessaging.onMessage.listen((m) async {
+      if (m.data['type'] == 'water_reminder' && !await OverlayPopUp.isActive())
+        await _showReminderOverlay();
     });
-
-    // ── Background FCM tap ──────────────────────────────────────────────────
-    // Fires when user taps a tray notification that arrived while app was
-    // backgrounded (only matters if a notification-type message ever slips
-    // through; kept as a safety net).
-    FirebaseMessaging.onMessageOpenedApp.listen((message) async {
-      if (message.data['type'] == 'water_reminder') {
-        if (!await OverlayPopUp.isActive()) {
-          await _showReminderOverlay();
-        }
-      }
+    FirebaseMessaging.onMessageOpenedApp.listen((m) async {
+      if (m.data['type'] == 'water_reminder' && !await OverlayPopUp.isActive())
+        await _showReminderOverlay();
     });
-
-    // ── Terminated FCM tap ──────────────────────────────────────────────────
-    // getInitialMessage returns the message that cold-started the app from a
-    // tray notification tap (null if launched normally).
-    FirebaseMessaging.instance.getInitialMessage().then((message) async {
-      if (message?.data['type'] == 'water_reminder') {
-        if (!await OverlayPopUp.isActive()) {
-          await _showReminderOverlay();
-        }
-      }
+    FirebaseMessaging.instance.getInitialMessage().then((m) async {
+      if (m?.data['type'] == 'water_reminder' && !await OverlayPopUp.isActive())
+        await _showReminderOverlay();
     });
   }
 
   @override
   void dispose() {
-    _hydrationTicker?.cancel();
+    _ticker?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -809,98 +871,70 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      unawaited(_syncHydrationFromPrefs());
+      unawaited(_pullHydration());
+      unawaited(_refreshPermissions());
     }
   }
 
-  Future<void> _updateHydrationFromClock() async {
-    final latestHydration = await _readHydrationValue();
-
+  Future<void> _pullHydration() async {
+    final h = await _readHydration();
     if (!mounted) return;
-    setState(() {
-      _hydration = latestHydration;
-    });
+    setState(() => _hydration = h);
   }
 
-  Future<void> _syncHydrationFromPrefs() async {
-    final latestHydration = await _readHydrationValue();
+  Future<void> _markDrink() async {
+    final h = await _drink();
     if (!mounted) return;
-    setState(() {
-      _hydration = latestHydration;
-    });
-  }
-
-  Future<void> _markDrinkNow() async {
-    final updatedHydration = await _recordDrinkAction();
-    if (!mounted) return;
-    setState(() {
-      _hydration = updatedHydration;
-    });
-    _showSnack('Nice! Hydration increased. Keep it going to fully bloom.');
+    setState(() => _hydration = h);
+    _snack('Your flower thanks you 🌸');
   }
 
   Future<void> _init() async {
     await _requestNotificationPermissions();
-
     if (Platform.isAndroid) {
       final info = await DeviceInfoPlugin().androidInfo;
       if (mounted) setState(() => _brand = info.manufacturer);
     }
-
-    // ── Terminated local notification tap ───────────────────────────────────
-    // onDidReceiveNotificationResponse only fires when the app is already alive.
-    // For terminated-state taps we need this separate check.
-    final launchDetails =
-        await _localNotifications.getNotificationAppLaunchDetails();
-    if (launchDetails?.didNotificationLaunchApp == true) {
-      if (!await OverlayPopUp.isActive()) {
-        await _showReminderOverlay();
-      }
-    }
+    final launch = await _localNotifications.getNotificationAppLaunchDetails();
+    if (launch?.didNotificationLaunchApp == true &&
+        !await OverlayPopUp.isActive()) await _showReminderOverlay();
 
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getInt('intervalMinutes');
-    final wasRegistered = prefs.getBool('registered') ?? false;
+    final wasReg = prefs.getBool('registered') ?? false;
     final overlayDone = await OverlayPopUp.checkPermission();
-    final batteryDone = prefs.getBool('batteryPermissionDone') ?? false;
-    final savedHydration = await _readHydrationValue();
+    final batteryLimitDone = await _isBatteryLimitDone();
+    final backgroundActivityDone = prefs.getBool(_backgroundActivityDoneKey) ??
+        prefs.getBool(_legacyBatteryPermissionDoneKey) ??
+        false;
+    final savedH = await _readHydration();
 
-    if (mounted) {
+    if (mounted)
       setState(() {
-        if (saved != null && _intervalOptions.contains(saved)) {
+        if (saved != null && _intervals.contains(saved))
           _intervalMinutes = saved;
-        }
-        _registered = wasRegistered;
+        _registered = wasReg;
         _overlayPermissionDone = overlayDone;
-        _batteryPermissionDone = batteryDone;
-        _hydration = savedHydration;
-        _status = wasRegistered
-            ? '🟢 Active — reminding every $_intervalMinutes min'
-            : 'Tap Start to activate reminders';
+        _batteryLimitDone = batteryLimitDone;
+        _backgroundActivityDone = backgroundActivityDone;
+        _hydration = savedH;
+        _status = wasReg
+            ? 'Watering every $_intervalMinutes min'
+            : 'Tap Start to bloom';
       });
-    }
   }
 
   Future<void> _register() async {
     if (_busy) return;
-
-    // if (_intervalMinutes < 10) {
-    //   setState(() => _status = '❌ Minimum interval is 10 minutes.');
-    //   return;
-    // }
-
     setState(() {
       _busy = true;
       _status = 'Registering...';
     });
-
     try {
       final deviceId = await FirebaseInstallations.instance.getId();
-      final fcmToken = await FirebaseMessaging.instance.getToken();
-
-      if (fcmToken == null) {
-        setState(
-            () => _status = '❌ Failed to get FCM token. Check Firebase setup.');
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token == null) {
+        setState(() => _status = 'Failed to get FCM token.');
         return;
       }
 
@@ -908,104 +942,160 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         Uri.parse('$_backendUrl/api/register'),
         headers: {
           'Content-Type': 'application/json',
-          'x-register-secret': _registerSecret,
+          'x-register-secret': _registerSecret
         },
         body: jsonEncode({
           'deviceId': deviceId,
-          'fcmToken': fcmToken,
-          'intervalMinutes': _intervalMinutes,
+          'fcmToken': token,
+          'intervalMinutes': _intervalMinutes
         }),
       );
-
       if (res.statusCode == 200) {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setInt('intervalMinutes', _intervalMinutes);
         await prefs.setBool('registered', true);
-        if (mounted) {
+        if (mounted)
           setState(() {
             _registered = true;
-            _status = '🟢 Active — reminding every $_intervalMinutes min';
+            _status = 'Watering every $_intervalMinutes min';
           });
-        }
       } else {
-        if (mounted) setState(() => _status = '❌ Server error: ${res.body}');
+        if (mounted) setState(() => _status = 'Server error: ${res.body}');
       }
-    } catch (err) {
-      if (mounted) setState(() => _status = '❌ Error: $err');
+    } catch (e) {
+      if (mounted) setState(() => _status = 'Error: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _refreshPermissionState() async {
+  Future<void> _refreshPermissions() async {
     final prefs = await SharedPreferences.getInstance();
     final overlayDone = await OverlayPopUp.checkPermission();
-    final batteryDone = prefs.getBool('batteryPermissionDone') ?? false;
+    final batteryLimitDone = await _isBatteryLimitDone();
+    final backgroundActivityDone = prefs.getBool(_backgroundActivityDoneKey) ??
+        prefs.getBool(_legacyBatteryPermissionDoneKey) ??
+        false;
     if (!mounted) return;
     setState(() {
       _overlayPermissionDone = overlayDone;
-      _batteryPermissionDone = batteryDone;
+      _batteryLimitDone = batteryLimitDone;
+      _backgroundActivityDone = backgroundActivityDone;
     });
   }
 
-  Future<void> _handleOverlayPermission() async {
-    final alreadyGranted = await OverlayPopUp.checkPermission();
-    if (!alreadyGranted) {
-      await OverlayPopUp.requestPermission();
-    }
-    await _refreshPermissionState();
-    if (_overlayPermissionDone) {
-      _showSnack('✅ Display overlay permission enabled');
+  Future<bool> _isBatteryLimitDone() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      final status = await Permission.ignoreBatteryOptimizations.status;
+      return status.isGranted;
+    } catch (_) {
+      return false;
     }
   }
 
-  Future<void> _handleBatteryPermission() async {
+  Future<void> _handleOverlayPermission() async {
+    if (!await OverlayPopUp.checkPermission())
+      await OverlayPopUp.requestPermission();
+    await _refreshPermissions();
+    if (_overlayPermissionDone) _snack('Display overlay enabled ✓');
+  }
+
+  Future<void> _handleBatteryLimitPermission() async {
     try {
-      if (_isXiaomiBrand(_brand)) {
-        await _openMiuiPermissionEditor();
-      } else {
-        final intent = AndroidIntent(
-          action: 'android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS',
-        );
-        await intent.launch();
+      final status = await Permission.ignoreBatteryOptimizations.request();
+      if (!status.isGranted) {
+        await AndroidIntent(
+                action: 'android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS')
+            .launch();
       }
     } catch (_) {
       await openAppSettings();
     }
 
+    await _refreshPermissions();
+    if (_batteryLimitDone) {
+      _snack('Battery limit disabled ✓');
+    } else {
+      _snack('Set battery use to unrestricted, then return here.');
+    }
+  }
+
+  Future<void> _handleBackgroundActivityPermission() async {
+    try {
+      if (_isXiaomiBrand(_brand)) {
+        await _openMiuiPermissionEditor();
+      } else {
+        await AndroidIntent(
+          action: 'android.settings.APPLICATION_DETAILS_SETTINGS',
+          data: 'package:$_appPackage',
+        ).launch();
+      }
+    } catch (_) {
+      await openAppSettings();
+    }
     if (!mounted) return;
 
+    final theme = HydrationTheme.of(_hydration);
     final confirmed = await showModalBottomSheet<bool>(
       context: context,
-      backgroundColor: AppColors.surface,
+      backgroundColor: theme.surface,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) {
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) {
+        final bt = HydrationTheme.of(_hydration);
         return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 18, 20, 22),
+          padding: EdgeInsets.fromLTRB(
+              24, 12, 24, MediaQuery.of(ctx).padding.bottom + 20),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                'Battery permission completed?',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
+              Center(
+                  child: Container(
+                width: 36,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 20),
+                decoration: BoxDecoration(
+                  color: bt.surfaceAlt,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              )),
+              Text('Background activity done?',
+                  style: TextStyle(
+                    color: bt.textPrimary,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.5,
+                  )),
               const SizedBox(height: 8),
               Text(
-                'After enabling unrestricted background or battery settings, mark this as done.',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 16),
-              ElevatedButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('Mark as done'),
+                  'After allowing autostart or background activity, mark it done.',
+                  style: TextStyle(
+                      color: bt.textSecondary, fontSize: 14, height: 1.5)),
+              const SizedBox(height: 20),
+              SizedBox(
+                height: 52,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: bt.accent,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                    textStyle: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w800),
+                  ),
+                  child: const Text('Mark as done'),
+                ),
               ),
               const SizedBox(height: 8),
               TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('Not yet'),
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: Text('Not yet',
+                    style: TextStyle(
+                        color: bt.textSecondary, fontWeight: FontWeight.w600)),
               ),
             ],
           ),
@@ -1015,195 +1105,464 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     if (confirmed == true) {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('batteryPermissionDone', true);
-      await _refreshPermissionState();
-      _showSnack('✅ Battery permissions marked as done');
+      await prefs.setBool(_backgroundActivityDoneKey, true);
+      await _refreshPermissions();
+      _snack('Background activity enabled ✓');
     }
   }
 
-  void _showSnack(String msg) {
+  void _snack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), duration: const Duration(seconds: 6)));
+    final theme = HydrationTheme.of(_hydration);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg,
+          style:
+              TextStyle(color: theme.textPrimary, fontWeight: FontWeight.w600)),
+      backgroundColor: theme.surface,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      duration: const Duration(seconds: 4),
+    ));
   }
 
-  Widget _buildPermissionButton({
-    required String label,
-    required bool done,
-    required VoidCallback onPressed,
-  }) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 250),
-      curve: Curves.easeOut,
-      decoration: BoxDecoration(
-        color: done ? AppColors.primary.withOpacity(0.12) : AppColors.surface,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color:
-              done ? AppColors.primary.withOpacity(0.35) : AppColors.secondary,
-        ),
-      ),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-        title: Text(
-          label,
-          style: const TextStyle(
-            fontWeight: FontWeight.w500,
-            color: AppColors.textPrimary,
+  // ─── Build ─────────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.of(context).padding.bottom;
+    // Single source of truth — everything reads from this
+    final theme = HydrationTheme.of(_hydration);
+    final state = FlowerState.of(_hydration);
+
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(children: [
+        // Animated full-screen background
+        _Bg(theme: theme),
+
+        SafeArea(
+          bottom: false,
+          child: CustomScrollView(
+            physics: const BouncingScrollPhysics(),
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                sliver: SliverToBoxAdapter(child: _appBar(theme)),
+              ),
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(24, 36, 24, bottom + 48),
+                sliver: SliverList(
+                    delegate: SliverChildListDelegate([
+                  // Hero
+                  Center(
+                      child:
+                          HydrationHero(hydration: _hydration, theme: theme)),
+                  const SizedBox(height: 20),
+
+                  // State card
+                  _stateCard(theme, state),
+                  const SizedBox(height: 40),
+
+                  // Drink CTA
+                  _drinkButton(theme),
+                  const SizedBox(height: 52),
+
+                  // Interval
+                  _sectionLabel('Remind me every', theme),
+                  const SizedBox(height: 14),
+                  _intervalChips(theme),
+                  const SizedBox(height: 12),
+                  _startButton(theme),
+                  const SizedBox(height: 52),
+
+                  // Setup
+                  _sectionLabel('Setup', theme),
+                  const SizedBox(height: 14),
+                  _permTile(
+                    label: 'Display overlay',
+                    sub: 'Show reminders over other apps',
+                    done: _overlayPermissionDone,
+                    onTap: _handleOverlayPermission,
+                    theme: theme,
+                  ),
+                  const SizedBox(height: 10),
+                  _permTile(
+                    label: 'Background activity',
+                    sub: 'Allow autostart and background running',
+                    done: _backgroundActivityDone,
+                    onTap: _handleBackgroundActivityPermission,
+                    theme: theme,
+                  ),
+                  const SizedBox(height: 10),
+                  _permTile(
+                    label: 'Battery limit',
+                    sub: 'Set battery use to unrestricted',
+                    done: _batteryLimitDone,
+                    onTap: _handleBatteryLimitPermission,
+                    theme: theme,
+                  ),
+                  if (_overlayPermissionDone &&
+                      _backgroundActivityDone &&
+                      _batteryLimitDone)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 20),
+                      child: Center(
+                          child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                  shape: BoxShape.circle, color: theme.accent)),
+                          const SizedBox(width: 8),
+                          Text('All systems active',
+                              style: TextStyle(
+                                color: theme.accent,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.2,
+                              )),
+                        ],
+                      )),
+                    ),
+                ])),
+              ),
+            ],
           ),
         ),
-        trailing: Icon(
-          done ? Icons.check_circle_rounded : Icons.radio_button_unchecked,
-          color: done ? AppColors.primary : AppColors.textSecondary,
-        ),
-        onTap: onPressed,
-      ),
+      ]),
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final bottomInset = MediaQuery.of(context).viewPadding.bottom;
+  // ─── Sub-widgets — all accept HydrationTheme ────────────────────────────
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('💧 Water Reminder')),
-      body: DecoratedBox(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFFD8EAFF), AppColors.background],
-          ),
-        ),
-        child: SafeArea(
-          top: false,
-          bottom: false,
-          child: SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(20, 16, 20, bottomInset + 24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+  Widget _appBar(HydrationTheme t) => Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(24),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppColors.primary.withOpacity(0.12),
-                        blurRadius: 24,
-                        offset: const Offset(0, 12),
-                      ),
-                    ],
+                AnimatedDefaultTextStyle(
+                  duration: const Duration(milliseconds: 600),
+                  style: TextStyle(
+                    color: t.textPrimary,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.8,
                   ),
-                  child: Column(
-                    children: [
-                      Text(
-                        'My Water Plant',
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _status,
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodyMedium,
-                      ),
-                      const SizedBox(height: 12),
-                      FlowerWidget(hydration: _hydration),
-                      const SizedBox(height: 8),
-                      StatusCard(hydration: _hydration),
-                      const SizedBox(height: 14),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed: _markDrinkNow,
-                          icon: const Icon(Icons.local_drink_rounded),
-                          label: const Text('I drank now'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: AppColors.primary,
-                            side: const BorderSide(color: AppColors.primary),
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(30),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
+                  child: const Text('Oasis'),
+                ),
+                const SizedBox(height: 2),
+                AnimatedDefaultTextStyle(
+                  duration: const Duration(milliseconds: 600),
+                  style: TextStyle(
+                      color: t.textSecondary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500),
+                  child: Text(_status),
+                ),
+              ]),
+          const Spacer(),
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 600),
+            curve: Curves.easeOutCubic,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: _registered ? t.chipSelected : t.surfaceAlt,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(
+                  color: _registered ? t.chipBorderSelected : t.border,
+                  width: 1),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 600),
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _registered ? t.accent : t.textMuted,
+                ),
+              ),
+              const SizedBox(width: 7),
+              AnimatedDefaultTextStyle(
+                duration: const Duration(milliseconds: 600),
+                style: TextStyle(
+                  color: _registered ? t.accent : t.textMuted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.3,
+                ),
+                child: Text(_registered ? 'Blooming' : 'Dormant'),
+              ),
+            ]),
+          ),
+        ],
+      );
+
+  Widget _stateCard(HydrationTheme t, FlowerState state) => AnimatedContainer(
+        duration: const Duration(milliseconds: 600),
+        curve: Curves.easeOutCubic,
+        padding: const EdgeInsets.fromLTRB(18, 15, 18, 15),
+        decoration: BoxDecoration(
+          color: t.surface,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: t.border, width: 1),
+          boxShadow: [
+            BoxShadow(
+              color: t.accent.withOpacity(0.10),
+              blurRadius: 14,
+              offset: const Offset(0, 4),
+            )
+          ],
+        ),
+        child: Row(children: [
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 500),
+            width: 48,
+            height: 48,
+            decoration:
+                BoxDecoration(shape: BoxShape.circle, color: t.chipSelected),
+            child: Center(
+                child: Text(state.emoji, style: const TextStyle(fontSize: 24))),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+              child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 350),
+                transitionBuilder: (child, animation) => FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0.0, 0.2),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
                   ),
                 ),
-                const SizedBox(height: 24),
-                const Text('Remind me every:',
-                    style:
-                        TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: _intervalOptions
-                      .map((min) => ChoiceChip(
-                            label: Text(min < 60
-                                ? '${min}m'
-                                : '${min ~/ 60}h${min % 60 != 0 ? ' ${min % 60}m' : ''}'),
-                            labelStyle: TextStyle(
-                              color: _intervalMinutes == min
-                                  ? AppColors.primary
-                                  : AppColors.textPrimary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                            backgroundColor: Colors.white,
-                            selectedColor: AppColors.primary.withOpacity(0.18),
-                            checkmarkColor: AppColors.primary,
-                            selected: _intervalMinutes == min,
-                            onSelected: (_) {
-                              setState(() {
-                                _intervalMinutes = min;
-                              });
-                            },
-                          ))
-                      .toList(),
-                ),
-                const SizedBox(height: 24),
-                ElevatedButton(
-                  onPressed: _busy ? null : _register,
-                  child: Text(_busy
-                      ? 'Please wait...'
-                      : _registered
-                          ? 'Update interval'
-                          : '▶  Start reminders'),
-                ),
-                const SizedBox(height: 24),
-                const Text(
-                  'Permissions',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                ),
-                const SizedBox(height: 12),
-                _buildPermissionButton(
-                  label: 'Display overlay permission',
-                  done: _overlayPermissionDone,
-                  onPressed: _handleOverlayPermission,
-                ),
-                const SizedBox(height: 10),
-                _buildPermissionButton(
-                  label: 'Battery permissions',
-                  done: _batteryPermissionDone,
-                  onPressed: _handleBatteryPermission,
-                ),
-                const SizedBox(height: 16),
-                if (_overlayPermissionDone && _batteryPermissionDone)
-                  const Text(
-                    'All required permissions are set',
-                    textAlign: TextAlign.center,
+                child: Text(state.name,
+                    key: ValueKey(state.name),
                     style: TextStyle(
-                      color: AppColors.primary,
-                      fontWeight: FontWeight.w600,
-                    ),
+                      color: t.accent,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.3,
+                    )),
+              ),
+              const SizedBox(height: 2),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 350),
+                transitionBuilder: (child, animation) => FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0.0, 0.2),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
                   ),
-              ],
+                ),
+                child: Text(state.message,
+                    key: ValueKey(state.message),
+                    style: TextStyle(
+                        color: t.textSecondary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500)),
+              ),
+            ],
+          )),
+        ]),
+      );
+
+  Widget _drinkButton(HydrationTheme t) => SizedBox(
+        height: 60,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 600),
+          child: ElevatedButton.icon(
+            onPressed: _markDrink,
+            icon: const Icon(Icons.water_drop_rounded, size: 20),
+            label: const Text('I watered the flower!'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: t.accent,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              textStyle: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.3),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
             ),
           ),
         ),
-      ),
-    );
-  }
+      );
+
+  Widget _sectionLabel(String text, HydrationTheme t) =>
+      AnimatedDefaultTextStyle(
+        duration: const Duration(milliseconds: 600),
+        style: TextStyle(
+          color: t.textMuted,
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 2.5,
+        ),
+        child: Text(text.toUpperCase()),
+      );
+
+  Widget _intervalChips(HydrationTheme t) => Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: _intervals.map((min) {
+          final sel = _intervalMinutes == min;
+          final label = min < 60
+              ? '${min}m'
+              : '${min ~/ 60}h${min % 60 != 0 ? ' ${min % 60}m' : ''}';
+          return GestureDetector(
+            onTap: () => setState(() => _intervalMinutes = min),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeOutCubic,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+              decoration: BoxDecoration(
+                color: sel ? t.chipSelected : t.surface,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                    color: sel ? t.chipBorderSelected : t.border, width: 1),
+                boxShadow: sel
+                    ? []
+                    : [
+                        BoxShadow(
+                          color:
+                              Colors.black.withOpacity(0.04 + (1 - t.h) * 0.04),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        )
+                      ],
+              ),
+              child: AnimatedDefaultTextStyle(
+                duration: const Duration(milliseconds: 400),
+                style: TextStyle(
+                  color: sel ? t.accent : t.textSecondary,
+                  fontWeight: sel ? FontWeight.w800 : FontWeight.w500,
+                  fontSize: 14,
+                  letterSpacing: -0.2,
+                ),
+                child: Text(label),
+              ),
+            ),
+          );
+        }).toList(),
+      );
+
+  Widget _startButton(HydrationTheme t) => SizedBox(
+        height: 52,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 600),
+          child: OutlinedButton(
+            onPressed: _busy ? null : _register,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: t.accent,
+              side: BorderSide(color: t.accent.withOpacity(0.30), width: 1),
+              backgroundColor: t.accent.withOpacity(0.07),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
+            ),
+            child: AnimatedDefaultTextStyle(
+              duration: const Duration(milliseconds: 400),
+              style: TextStyle(
+                color: t.accent,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.2,
+              ),
+              child: Text(_busy
+                  ? 'Please wait...'
+                  : _registered
+                      ? 'Update interval'
+                      : 'Start reminders'),
+            ),
+          ),
+        ),
+      );
+
+  Widget _permTile({
+    required String label,
+    required String sub,
+    required bool done,
+    required VoidCallback onTap,
+    required HydrationTheme theme,
+  }) =>
+      GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          decoration: BoxDecoration(
+            color: theme.surface,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+                color: done ? theme.accent.withOpacity(0.28) : theme.border,
+                width: 1),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.04 + (1 - theme.h) * 0.04),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              )
+            ],
+          ),
+          child: Row(children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 500),
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: done ? theme.chipSelected : theme.surfaceAlt,
+              ),
+              child: Center(
+                  child: Icon(
+                done ? Icons.check_rounded : Icons.lock_outline_rounded,
+                color: done ? theme.accent : theme.textMuted,
+                size: 18,
+              )),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+                child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AnimatedDefaultTextStyle(
+                  duration: const Duration(milliseconds: 500),
+                  style: TextStyle(
+                    color: done ? theme.textPrimary : theme.textSecondary,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                    letterSpacing: -0.2,
+                  ),
+                  child: Text(label),
+                ),
+                const SizedBox(height: 2),
+                AnimatedDefaultTextStyle(
+                  duration: const Duration(milliseconds: 500),
+                  style: TextStyle(
+                      color: theme.textMuted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500),
+                  child: Text(sub),
+                ),
+              ],
+            )),
+            const SizedBox(width: 8),
+            Icon(Icons.arrow_forward_ios_rounded,
+                color: theme.textMuted, size: 13),
+          ]),
+        ),
+      );
 }
