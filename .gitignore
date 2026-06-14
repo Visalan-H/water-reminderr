@@ -1,0 +1,25 @@
+# Root Gitignore for Water Reminder Project
+
+# OS/System files
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# Stale folders
+waterapp/
+
+# Environment and Secrets (already ignored in subdirs, but added here for safety)
+.env
+.env.local
+build-release.bat
+
+# AI / Assistant workspaces/logs
+.commandcode/
+todo.md
+context.md
+senior_dev_review.md
+code_review.md
+walkthrough.md
+implementation_plan.md
+task.md

@@ -12,4 +12,11 @@ function registerAuth(req, res, next) {
     next();
 }
 
-module.exports = { cronAuth, registerAuth };
+function logAuth(req, res, next) {
+    if (req.headers['x-log-secret'] !== process.env.LOG_SECRET) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    next();
+}
+
+module.exports = { cronAuth, registerAuth, logAuth };

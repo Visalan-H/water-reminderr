@@ -10,6 +10,14 @@ const DEAD_TOKEN_CODES = [
     'messaging/invalid-argument',
 ];
 
+function isQuietHours(timezoneOffsetMinutes) {
+    const now = new Date();
+    const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const localMinutes = (utcMinutes + timezoneOffsetMinutes + 1440) % 1440;
+    const localHour = Math.floor(localMinutes / 60);
+    return localHour >= 22 || localHour < 6;
+}
+
 router.post('/', cronAuth, async (req, res) => {
     try {
         const now = new Date();
@@ -32,7 +40,36 @@ router.post('/', cronAuth, async (req, res) => {
             return res.status(200).json({ message: 'No devices due' });
         }
 
-        const tokens = dueDevices.map(d => d.fcmToken);
+        const activeDevices = [];
+        const quietDevices = [];
+
+        for (const device of dueDevices) {
+            if (isQuietHours(device.timezoneOffsetMinutes || 0)) {
+                quietDevices.push(device);
+            } else {
+                activeDevices.push(device);
+            }
+        }
+
+        if (quietDevices.length > 0) {
+            const quietDeviceIds = quietDevices.map(d => d.deviceId);
+            await Token.updateMany(
+                { deviceId: { $in: quietDeviceIds } },
+                { $set: { lastSentAt: now } }
+            );
+        }
+
+        if (activeDevices.length === 0) {
+            return res.status(200).json({
+                due: dueDevices.length,
+                sent: 0,
+                failed: 0,
+                cleaned: 0,
+                skipped: quietDevices.length,
+            });
+        }
+
+        const tokens = activeDevices.map(d => d.fcmToken);
 
         // Pure data message — no `notification` key at any level.
         // With a notification message Android intercepts delivery when the app is
@@ -57,7 +94,7 @@ router.post('/', cronAuth, async (req, res) => {
 
         response.responses.forEach((r, i) => {
             if (r.success) {
-                sentDeviceIds.push(dueDevices[i].deviceId);
+                sentDeviceIds.push(activeDevices[i].deviceId);
             } else if (DEAD_TOKEN_CODES.includes(r.error?.code)) {
                 deadTokens.push(tokens[i]);
             }
@@ -79,6 +116,7 @@ router.post('/', cronAuth, async (req, res) => {
             sent: response.successCount,
             failed: response.failureCount,
             cleaned: deadTokens.length,
+            skipped: quietDevices.length,
         });
     } catch (err) {
         console.error('Remind error:', err.message);

@@ -15,9 +15,9 @@ import 'package:overlay_pop_up/overlay_pop_up.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const String _backendUrl = 'https://water-reminderr.vercel.app';
-const String _registerSecret =
-    '3d0b192504daa3643a1a7ebc85c21053420bb8f2fa09bbc5ddfc6cb709d832c597777c91dd4d3ed588232a75df77c3b4404c01b59b88a8f057fa10b9a73b0a13';
+const String _backendUrl = String.fromEnvironment('BACKEND_URL');
+const String _registerSecret = String.fromEnvironment('REGISTER_SECRET');
+const String _logSecret = String.fromEnvironment('LOG_SECRET');
 const String _overlayIcon = 'ic_launcher';
 const String _overlayTitle = 'Water Reminder';
 const String _appPackage = 'com.example.waterreminder';
@@ -108,11 +108,40 @@ Future<double> _changeHydration(double delta, {bool markDrink = false}) async {
 Future<double> _drink() => _changeHydration(_drinkBoost, markDrink: true);
 Future<double> _dismiss() => _changeHydration(-_dismissDrop);
 
+bool _isQuietHours() {
+  final hour = DateTime.now().hour;
+  return hour >= 22 || hour < 6;
+}
+
+// ─── Remote logging ────────────────────────────────────────────────────
+Future<void> _remoteLog(String event, {String? deviceId, Map<String, dynamic>? meta}) async {
+  try {
+    await http.post(
+      Uri.parse('$_backendUrl/api/log'),
+      headers: {'Content-Type': 'application/json', 'x-log-secret': _logSecret},
+      body: jsonEncode({'event': event, 'deviceId': deviceId, 'meta': meta ?? {}}),
+    ).timeout(const Duration(seconds: 6));
+  } catch (_) {}
+}
+
 // ─── FCM background handler ─────────────────────────────────────────────
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
   if (message.data['type'] != 'water_reminder') return;
+
+  String? deviceId;
+  try { deviceId = await FirebaseInstallations.instance.getId(); } catch (_) {}
+
+  final quietHours = _isQuietHours();
+  await _remoteLog('bg_handler_fired', deviceId: deviceId, meta: {
+    'quietHours': quietHours,
+    'messageId': message.messageId,
+    'ts': DateTime.now().toIso8601String(),
+  });
+
+  if (quietHours) return;
+
   final plugin = FlutterLocalNotificationsPlugin();
   await plugin.initialize(const InitializationSettings(
       android: AndroidInitializationSettings('@mipmap/ic_launcher')));
@@ -128,37 +157,54 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
         playSound: true,
         showBadge: true,
       ));
+
   try {
-    if (await OverlayPopUp.checkPermission() &&
-        !await OverlayPopUp.isActive()) {
+    await plugin.show(
+      0,
+      message.data['title'] ?? '💧 Drink Water!',
+      message.data['body'] ?? 'Your body needs hydration.',
+      const NotificationDetails(
+          android: AndroidNotificationDetails(
+        'water_reminder',
+        'Water Reminder',
+        channelDescription: 'Water drinking reminders',
+        importance: Importance.max,
+        priority: Priority.max,
+        fullScreenIntent: true,
+        visibility: NotificationVisibility.public,
+        enableVibration: true,
+        playSound: true,
+      )),
+    );
+    await _remoteLog('notification_shown', deviceId: deviceId, meta: {'ts': DateTime.now().toIso8601String()});
+  } catch (e) {
+    await _remoteLog('notification_failed', deviceId: deviceId, meta: {'error': e.toString(), 'ts': DateTime.now().toIso8601String()});
+  }
+
+  try {
+    final hasPermission = await OverlayPopUp.checkPermission();
+    final isActive = hasPermission ? await OverlayPopUp.isActive() : false;
+    if (hasPermission && !isActive) {
       await _showReminderOverlay();
-      return;
+      await _remoteLog('overlay_shown', deviceId: deviceId, meta: {'ts': DateTime.now().toIso8601String()});
+    } else {
+      await _remoteLog('overlay_skipped', deviceId: deviceId, meta: {
+        'hasPermission': hasPermission,
+        'isActive': isActive,
+        'ts': DateTime.now().toIso8601String(),
+      });
     }
-  } catch (_) {}
-  await plugin.show(
-    0,
-    message.data['title'] ?? '💧 Drink Water!',
-    message.data['body'] ?? 'Your body needs hydration.',
-    const NotificationDetails(
-        android: AndroidNotificationDetails(
-      'water_reminder',
-      'Water Reminder',
-      channelDescription: 'Water drinking reminders',
-      importance: Importance.max,
-      priority: Priority.max,
-      fullScreenIntent: true,
-      visibility: NotificationVisibility.public,
-      enableVibration: true,
-      playSound: true,
-      autoCancel: true,
-    )),
-  );
+  } catch (e) {
+    await _remoteLog('overlay_failed', deviceId: deviceId, meta: {'error': e.toString(), 'ts': DateTime.now().toIso8601String()});
+  }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  HYDRATION THEME
-//  Everything — bg, surface, text, borders, blobs — derived from hydration.
-// ─────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  VISUAL LAYER — everything below until "main()" is the redesigned UI
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Theme: smooth continuous interpolation ──────────────────────────────
+
 class HydrationTheme {
   final double h;
   final Color bg;
@@ -169,8 +215,6 @@ class HydrationTheme {
   final Color textMuted;
   final Color accent;
   final Color border;
-  final Color blobA;
-  final Color blobB;
 
   const HydrationTheme._({
     required this.h,
@@ -182,335 +226,410 @@ class HydrationTheme {
     required this.textMuted,
     required this.accent,
     required this.border,
-    required this.blobA,
-    required this.blobB,
   });
 
-  // ─── PALETTES ─────────────────────────────────────────
-
-  static const _dry = _Palette(
-    bg: Color(0xFF0F0202),
-    surface: Color(0xFF1C0505),
-    surfaceAlt: Color(0xFF2A0808),
-    textPrimary: Color(0xFFFFE4E4),
-    textSecondary: Color(0xFFCC6666),
-    textMuted: Color(0xFFC86464),
-    accent: Color(0xFFFF3B30),
-    border: Color(0xFF381412),
-    blobA: Color(0xFF41100F),
-    blobB: Color(0xFF240A09),
-  );
-
-  static const _mid = _Palette(
-    bg: Color(0xFFFFF6ED),
-    surface: Color(0xFFFFFFFF),
-    surfaceAlt: Color(0xFFFDE8D6),
-    textPrimary: Color(0xFF4A2B12),
-    textSecondary: Color(0xFF8C5F36),
-    textMuted: Color(0xFFB5845C),
-    accent: Color(0xFFFF8C00),
-    border: Color(0xFFF5D6B8),
-    blobA: Color(0xFFFDE1C8),
-    blobB: Color(0xFFFCECDD),
-  );
-
-  static const _hydrated = _Palette(
-    bg: Color(0xFFF0F6FF),
-    surface: Color(0xFFFFFFFF),
-    surfaceAlt: Color(0xFFE8F0FE),
-    textPrimary: Color(0xFF0D1E3A),
-    textSecondary: Color(0xFF4D6FA8),
-    textMuted: Color(0xFF3B5C8A),
-    accent: Color(0xFF2563EB),
-    border: Color(0xFFD4E2F9),
-    blobA: Color(0xFFCDE0FD),
-    blobB: Color(0xFFE6EFFF),
-  );
-
-  // ─── FACTORY (HARD SWITCH — NO GREY EVER) ─────────────
+  static Color _lerp3(Color a, Color b, Color c, double t) {
+    if (t < 0.5) return Color.lerp(a, b, t * 2.0)!;
+    return Color.lerp(b, c, (t - 0.5) * 2.0)!;
+  }
 
   factory HydrationTheme.of(double hydration) {
     final t = hydration.clamp(0.0, 1.0);
 
-    late _Palette p;
-
-    if (t < 0.30) {
-      p = _dry;
-    } else if (t < 0.65) {
-      p = _mid;
-    } else {
-      p = _hydrated;
-    }
-
     return HydrationTheme._(
       h: t,
-      bg: p.bg,
-      surface: p.surface,
-      surfaceAlt: p.surfaceAlt,
-      textPrimary: p.textPrimary,
-      textSecondary: p.textSecondary,
-      textMuted: p.textMuted,
-      accent: p.accent,
-      border: p.border,
-      blobA: p.blobA,
-      blobB: p.blobB,
+      bg: _lerp3(
+        const Color(0xFF110808),
+        const Color(0xFF111008),
+        const Color(0xFF081109),
+        t,
+      ),
+      surface: _lerp3(
+        const Color(0xFF1E1212),
+        const Color(0xFF1E1A12),
+        const Color(0xFF121E16),
+        t,
+      ),
+      surfaceAlt: _lerp3(
+        const Color(0xFF281818),
+        const Color(0xFF282218),
+        const Color(0xFF182820),
+        t,
+      ),
+      textPrimary: _lerp3(
+        const Color(0xFFF5E0E0),
+        const Color(0xFFF5EFE0),
+        const Color(0xFFE0F5E8),
+        t,
+      ),
+      textSecondary: _lerp3(
+        const Color(0xFFBB8888),
+        const Color(0xFFBBA888),
+        const Color(0xFF88BB98),
+        t,
+      ),
+      textMuted: _lerp3(
+        const Color(0xFF886666),
+        const Color(0xFF887E66),
+        const Color(0xFF668878),
+        t,
+      ),
+      accent: _lerp3(
+        const Color(0xFFE85454),
+        const Color(0xFFD4A846),
+        const Color(0xFF42CC88),
+        t,
+      ),
+      border: _lerp3(
+        const Color(0xFF382020),
+        const Color(0xFF383020),
+        const Color(0xFF203828),
+        t,
+      ),
     );
   }
 
-  // ─── DERIVED COLORS (unchanged) ───────────────────────
-
-  Color get surfaceBorder => (h < 0.5)
-      ? Color.lerp(const Color(0xFF501916), const Color(0xFFF0CBAB), h * 2.0)!
-      : Color.lerp(
-          const Color(0xFFF0CBAB),
-          const Color(0xFFC3D6F7),
-          (h - 0.5) * 2.0,
-        )!;
-
-  Color get chipSelected => (h < 0.5)
-      ? Color.lerp(const Color(0xFF3B1210), const Color(0xFFFFF0E0), h * 2.0)!
-      : Color.lerp(
-          const Color(0xFFFFF0E0),
-          const Color(0xFFE2EAF8),
-          (h - 0.5) * 2.0,
-        )!;
-
-  Color get chipBorderSelected => (h < 0.5)
-      ? Color.lerp(const Color(0xFF75241E), const Color(0xFFFFC080), h * 2.0)!
-      : Color.lerp(
-          const Color(0xFFFFC080),
-          const Color(0xFFAABCED),
-          (h - 0.5) * 2.0,
-        )!;
+  Color get surfaceBorder => Color.lerp(border, accent, 0.25)!;
+  Color get chipSelected => Color.lerp(surface, accent, 0.18)!;
+  Color get chipBorderSelected => accent.withValues(alpha: 0.45);
 }
 
-// ─── INTERNAL PALETTE ───────────────────────────────────
+// ─── Flower state: personality ───────────────────────────────────────────
 
-class _Palette {
-  final Color bg, surface, surfaceAlt;
-  final Color textPrimary, textSecondary, textMuted;
-  final Color accent, border, blobA, blobB;
-
-  const _Palette({
-    required this.bg,
-    required this.surface,
-    required this.surfaceAlt,
-    required this.textPrimary,
-    required this.textSecondary,
-    required this.textMuted,
-    required this.accent,
-    required this.border,
-    required this.blobA,
-    required this.blobB,
-  });
-}
-
-// ─── Flower states ───────────────────────────────────────────────────────
 class FlowerState {
-  final String emoji;
   final String name;
   final String message;
-  const FlowerState(this.emoji, this.name, this.message);
+  const FlowerState._(this.name, this.message);
 
   static FlowerState of(double h) {
-    if (h >= 0.80)
-      return const FlowerState(
-          '🌸', 'Flourishing', 'In full bloom — you\'re doing great.');
-    if (h >= 0.60)
-      return const FlowerState(
-          '🌺', 'Blooming', 'Looking beautiful, keep it up.');
-    if (h >= 0.40)
-      return const FlowerState('🌷', 'Growing', 'Needs a little more water.');
-    if (h >= 0.20)
-      return const FlowerState(
-          '🌱', 'Struggling', 'Getting dry — drink water soon.');
-    return const FlowerState(
-        '🥀', 'Wilting', 'Urgent. Your flower is dying of thirst.');
+    if (h >= 0.85) return const FlowerState._('Thriving!', "Living my best life ✨");
+    if (h >= 0.70) return const FlowerState._('Happy', 'Feeling fresh and fabulous~');
+    if (h >= 0.55) return const FlowerState._('Content', 'Doing okay! A sip soon?');
+    if (h >= 0.40) return const FlowerState._('Thirsty', 'Could use some water 👀');
+    if (h >= 0.25) return const FlowerState._('Wilting', "Not doing so great...");
+    if (h >= 0.12) return const FlowerState._('Dying', 'I need water badly! 😰');
+    return const FlowerState._('SOS', "I'M LITERALLY DYING 💀");
   }
 }
 
-// ─── Arc painter ─────────────────────────────────────────────────────────
-class _ArcPainter extends CustomPainter {
-  final double progress;
-  final Color color;
-  final Color trackColor;
-  _ArcPainter(
-      {required this.progress, required this.color, required this.trackColor});
+// ─── Flower painter ──────────────────────────────────────────────────────
+
+class FlowerPainter extends CustomPainter {
+  final double hydration;
+  final double sway;
+  FlowerPainter({required this.hydration, required this.sway});
+
+  // Quadratic bezier helpers
+  static Offset _qBez(Offset p0, Offset p1, Offset p2, double t) {
+    final u = 1 - t;
+    return Offset(
+      u * u * p0.dx + 2 * u * t * p1.dx + t * t * p2.dx,
+      u * u * p0.dy + 2 * u * t * p1.dy + t * t * p2.dy,
+    );
+  }
+
+  static Offset _qBezTan(Offset p0, Offset p1, Offset p2, double t) {
+    final u = 1 - t;
+    return Offset(
+      2 * u * (p1.dx - p0.dx) + 2 * t * (p2.dx - p1.dx),
+      2 * u * (p1.dy - p0.dy) + 2 * t * (p2.dy - p1.dy),
+    );
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final c = Offset(size.width / 2, size.height / 2);
-    final r = size.width / 2 - 7;
-    final rect = Rect.fromCircle(center: c, radius: r);
+    final h = hydration.clamp(0.0, 1.0);
+    final w = size.width;
+    final ht = size.height;
+    final cx = w / 2;
 
-    canvas.drawCircle(
-        c,
-        r,
-        Paint()
-          ..color = trackColor
-          ..strokeWidth = 2.5
-          ..style = PaintingStyle.stroke);
+    // ── Layout proportions ──
+    final potW = w * 0.34;
+    final potH = ht * 0.11;
+    final potRimH = ht * 0.024;
+    final potTopY = ht * 0.83;
+    final potBotY = potTopY + potH;
 
-    if (progress < 0.01) return;
+    // Stem endpoints
+    final stemBaseX = cx;
+    final stemBaseY = potTopY - 2;
+    final stemTopBaseY = ht * 0.30;
 
-    final sweep = 2 * math.pi * progress;
+    // Droop increases as hydration drops
+    final droopX = (1.0 - h) * w * 0.18;
+    final droopY = (1.0 - h) * ht * 0.10;
+    final stemTopX = cx + droopX;
+    final stemTopY = stemTopBaseY + droopY;
 
-    canvas.drawArc(
-        rect,
-        -math.pi / 2,
-        sweep,
-        false,
-        Paint()
-          ..color = color.withOpacity(0.22)
-          ..strokeWidth = 14
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round);
+    // Control point for the stem curve
+    final stemCtrlX = cx + droopX * 0.55;
+    final stemCtrlY = (stemBaseY + stemTopY) / 2 + droopY * 0.2;
 
-    canvas.drawArc(
-        rect,
-        -math.pi / 2,
-        sweep,
-        false,
-        Paint()
-          ..color = color
-          ..strokeWidth = 3.5
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round);
+    final stemP0 = Offset(stemBaseX, stemBaseY);
+    final stemP1 = Offset(stemCtrlX, stemCtrlY);
+    final stemP2 = Offset(stemTopX, stemTopY);
 
-    final a = -math.pi / 2 + sweep;
-    final dot = Offset(c.dx + r * math.cos(a), c.dy + r * math.sin(a));
-    canvas.drawCircle(dot, 6, Paint()..color = color);
-    canvas.drawCircle(dot, 2.8, Paint()..color = Colors.white.withOpacity(0.9));
-  }
+    // ── Colors ──
+    final potColor =
+        Color.lerp(const Color(0xFF6A4535), const Color(0xFFB5694E), h)!;
+    final potRimColor =
+        Color.lerp(const Color(0xFF503028), const Color(0xFF8B5040), h)!;
+    final soilColor =
+        Color.lerp(const Color(0xFF3E2E20), const Color(0xFF2E2018), h)!;
+    final stemColor =
+        Color.lerp(const Color(0xFF6B5B3A), const Color(0xFF3D8B50), h)!;
+    final leafColor =
+        Color.lerp(const Color(0xFF7A6B3A), const Color(0xFF4CAF50), h)!;
+    final petalColor =
+        Color.lerp(const Color(0xFF8B6B5A), const Color(0xFFFF6B9D), h)!;
+    final petalInner =
+        Color.lerp(const Color(0xFF9B7B6A), const Color(0xFFFF8DB5), h)!;
+    final centerColor =
+        Color.lerp(const Color(0xFF6B4A2A), const Color(0xFFFFD54F), h)!;
 
-  @override
-  bool shouldRepaint(_ArcPainter o) =>
-      o.progress != progress || o.color != color || o.trackColor != trackColor;
-}
+    // ── Apply sway rotation around stem base ──
+    canvas.save();
+    final swayAngle = sway * (0.012 + h * 0.025);
+    canvas.translate(cx, stemBaseY);
+    canvas.rotate(swayAngle);
+    canvas.translate(-cx, -stemBaseY);
 
-// ─── Flower emoji ─────────────────────────────────────────────────────────
-class _FlowerEmoji extends StatelessWidget {
-  final double hydration;
-  final double size;
-  const _FlowerEmoji({required this.hydration, required this.size});
+    // ── Draw pot ──
+    // Body (tapered trapezoid)
+    final potPath = Path()
+      ..moveTo(cx - potW / 2, potTopY + potRimH)
+      ..lineTo(cx - potW * 0.37, potBotY)
+      ..quadraticBezierTo(cx, potBotY + 4, cx + potW * 0.37, potBotY)
+      ..lineTo(cx + potW / 2, potTopY + potRimH)
+      ..close();
+    canvas.drawPath(potPath, Paint()..color = potColor);
 
-  @override
-  Widget build(BuildContext context) {
-    final emoji = FlowerState.of(hydration).emoji;
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 650),
-      transitionBuilder: (child, anim) => FadeTransition(
-        opacity: anim,
-        child: ScaleTransition(
-          scale: Tween<double>(begin: 0.70, end: 1.0).animate(
-              CurvedAnimation(parent: anim, curve: Curves.easeOutBack)),
-          child: child,
-        ),
+    // Pot rim
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+            cx - potW / 2 - 3, potTopY, potW + 6, potRimH + 2),
+        Radius.circular(potRimH / 2),
       ),
-      child:
-          Text(emoji, key: ValueKey(emoji), style: TextStyle(fontSize: size)),
+      Paint()..color = potRimColor,
     );
+
+    // Soil fill
+    canvas.drawRect(
+      Rect.fromLTWH(cx - potW / 2 + 4, potTopY + potRimH - 1, potW - 8, 5),
+      Paint()..color = soilColor,
+    );
+
+    // Decorative stripe on pot
+    final stripeY = (potTopY + potRimH + potBotY) / 2;
+    canvas.drawLine(
+      Offset(cx - potW * 0.26, stripeY),
+      Offset(cx + potW * 0.26, stripeY),
+      Paint()
+        ..color = potRimColor.withValues(alpha: 0.5)
+        ..strokeWidth = 1.2
+        ..strokeCap = StrokeCap.round,
+    );
+
+    // ── Draw stem ──
+    final stemPath = Path()
+      ..moveTo(stemP0.dx, stemP0.dy)
+      ..quadraticBezierTo(stemP1.dx, stemP1.dy, stemP2.dx, stemP2.dy);
+    canvas.drawPath(
+        stemPath,
+        Paint()
+          ..color = stemColor
+          ..strokeWidth = w * 0.02
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round);
+
+    // ── Draw leaves ──
+    _drawLeaf(canvas, stemP0, stemP1, stemP2, 0.45, leafColor,
+        w * 0.10, true, h);
+    _drawLeaf(canvas, stemP0, stemP1, stemP2, 0.60, leafColor,
+        w * 0.085, false, h);
+
+    // ── Draw petals ──
+    const petalCount = 6;
+    final petalLen = w * 0.115 * (0.50 + h * 0.50);
+    final petalWid = w * 0.058 * (0.35 + h * 0.65);
+
+    for (int i = 0; i < petalCount; i++) {
+      final baseAngle = (i * 2 * math.pi / petalCount) - math.pi / 2;
+      final droopFactor = (1.0 - h) * 0.70;
+      // Each petal droops toward pointing downward
+      final angle = baseAngle + (math.pi / 2 - baseAngle) * droopFactor;
+
+      _drawPetal(
+        canvas,
+        Offset(stemTopX, stemTopY),
+        angle,
+        petalLen,
+        petalWid,
+        petalColor,
+        petalInner,
+      );
+    }
+
+    // ── Draw center ──
+    final centerR = w * 0.038 * (0.65 + h * 0.35);
+    canvas.drawCircle(
+        Offset(stemTopX, stemTopY), centerR, Paint()..color = centerColor);
+    // Highlight
+    canvas.drawCircle(
+      Offset(stemTopX - centerR * 0.25, stemTopY - centerR * 0.25),
+      centerR * 0.35,
+      Paint()..color = Colors.white.withValues(alpha: 0.10 + h * 0.15),
+    );
+
+    canvas.restore();
   }
+
+  void _drawPetal(Canvas canvas, Offset center, double angle, double length,
+      double width, Color color, Color innerColor) {
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(angle);
+
+    final path = Path()
+      ..moveTo(0, 0)
+      ..cubicTo(
+        width, -length * 0.25,
+        width * 0.55, -length * 0.85,
+        0, -length,
+      )
+      ..cubicTo(
+        -width * 0.55, -length * 0.85,
+        -width, -length * 0.25,
+        0, 0,
+      );
+
+    canvas.drawPath(path, Paint()..color = color);
+
+    // Inner lighter layer for depth
+    canvas.save();
+    canvas.scale(0.60, 0.60);
+    canvas.drawPath(path, Paint()..color = innerColor.withValues(alpha: 0.35));
+    canvas.restore();
+
+    canvas.restore();
+  }
+
+  void _drawLeaf(
+      Canvas canvas,
+      Offset p0,
+      Offset p1,
+      Offset p2,
+      double t,
+      Color color,
+      double leafSize,
+      bool leftSide,
+      double hydration) {
+    final pos = _qBez(p0, p1, p2, t);
+    final tan = _qBezTan(p0, p1, p2, t);
+    final stemAngle = math.atan2(tan.dy, tan.dx);
+
+    final leafBaseAngle =
+        leftSide ? stemAngle - math.pi / 2 : stemAngle + math.pi / 2;
+    final droopAmt = (1.0 - hydration) * math.pi * 0.35;
+    final leafAngle =
+        leftSide ? leafBaseAngle - droopAmt : leafBaseAngle + droopAmt;
+    final curLeafSize = leafSize * (0.6 + hydration * 0.4);
+
+    canvas.save();
+    canvas.translate(pos.dx, pos.dy);
+    canvas.rotate(leafAngle);
+
+    final leafPath = Path()
+      ..moveTo(0, 0)
+      ..cubicTo(
+        curLeafSize * 0.45, -curLeafSize * 0.15,
+        curLeafSize * 0.30, -curLeafSize * 0.55,
+        0, -curLeafSize,
+      )
+      ..cubicTo(
+        -curLeafSize * 0.30, -curLeafSize * 0.55,
+        -curLeafSize * 0.45, -curLeafSize * 0.15,
+        0, 0,
+      );
+
+    canvas.drawPath(leafPath, Paint()..color = color);
+
+    // Vein
+    canvas.drawLine(
+      Offset.zero,
+      Offset(0, -curLeafSize * 0.65),
+      Paint()
+        ..color = color.withValues(alpha: 0.25)
+        ..strokeWidth = 0.8,
+    );
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(FlowerPainter old) =>
+      old.hydration != hydration || old.sway != sway;
 }
 
-// ─── Hydration hero ───────────────────────────────────────────────────────
-class HydrationHero extends StatelessWidget {
+// ─── Animated flower widget ──────────────────────────────────────────────
+
+class AnimatedFlower extends StatefulWidget {
   final double hydration;
-  final HydrationTheme theme;
-  const HydrationHero(
-      {super.key, required this.hydration, required this.theme});
+  final double width;
+  const AnimatedFlower({super.key, required this.hydration, this.width = 260});
+
+  @override
+  State<AnimatedFlower> createState() => _AnimatedFlowerState();
+}
+
+class _AnimatedFlowerState extends State<AnimatedFlower>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _swayCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _swayCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 3500),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _swayCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final percent = (hydration * 100).round();
+    final height = widget.width * 1.25;
 
     return TweenAnimationBuilder<double>(
-      tween: Tween(end: hydration),
-      duration: const Duration(milliseconds: 1100),
-      curve: Curves.easeOutCubic,
-      builder: (_, animH, __) {
-        final animTheme = HydrationTheme.of(animH);
-        final glowOpacity = 0.08 + animH * 0.22;
-        final glowBlur = 18.0 + animH * 54.0;
-        final emojiSize = 58.0 + animH * 44.0;
-
-        return Column(children: [
-          SizedBox(
-            width: 260,
-            height: 260,
-            child: Stack(alignment: Alignment.center, children: [
-              CustomPaint(
-                size: const Size(260, 260),
-                painter: _ArcPainter(
-                  progress: animH,
-                  color: animTheme.accent,
-                  trackColor: animTheme.surfaceAlt,
-                ),
+      tween: Tween(end: widget.hydration),
+      duration: const Duration(milliseconds: 1500),
+      curve: Curves.easeInOutCubic,
+      builder: (_, h, __) {
+        return AnimatedBuilder(
+          animation: _swayCtrl,
+          builder: (_, __) {
+            return CustomPaint(
+              size: Size(widget.width, height),
+              painter: FlowerPainter(
+                hydration: h,
+                sway: math.sin(_swayCtrl.value * 2 * math.pi),
               ),
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 900),
-                curve: Curves.easeOutCubic,
-                width: 212,
-                height: 212,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: animTheme.surface,
-                  border: Border.all(
-                      color: animTheme.accent.withOpacity(0.18), width: 1.5),
-                  boxShadow: [
-                    BoxShadow(
-                      color: animTheme.accent.withOpacity(glowOpacity),
-                      blurRadius: glowBlur,
-                    ),
-                    BoxShadow(
-                      color:
-                          Colors.black.withOpacity(0.10 + (1 - animH) * 0.12),
-                      blurRadius: 20,
-                      offset: const Offset(0, 6),
-                    ),
-                  ],
-                ),
-                child: Center(
-                    child: _FlowerEmoji(hydration: animH, size: emojiSize)),
-              ),
-            ]),
-          ),
-          const SizedBox(height: 30),
-          TweenAnimationBuilder<Color?>(
-            tween: ColorTween(end: theme.accent),
-            duration: const Duration(milliseconds: 800),
-            builder: (_, c, __) => Text(
-              '$percent%',
-              style: TextStyle(
-                fontSize: 76,
-                fontWeight: FontWeight.w900,
-                color: c ?? theme.accent,
-                letterSpacing: -6,
-                height: 1.0,
-              ),
-            ),
-          ),
-          const SizedBox(height: 6),
-          TweenAnimationBuilder<Color?>(
-            tween: ColorTween(end: theme.accent.withOpacity(0.65)),
-            duration: const Duration(milliseconds: 800),
-            builder: (_, c, __) => Text(
-              FlowerState.of(hydration).name.toUpperCase(),
-              style: TextStyle(
-                color: c ?? theme.textSecondary,
-                fontSize: 11,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 3.5,
-              ),
-            ),
-          ),
-        ]);
+            );
+          },
+        );
       },
     );
   }
 }
 
-// ─── Full-screen background ───────────────────────────────────────────────
+// ─── Background ──────────────────────────────────────────────────────────
+
 class _Bg extends StatelessWidget {
   final HydrationTheme theme;
   const _Bg({required this.theme});
@@ -518,56 +637,30 @@ class _Bg extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Positioned.fill(
-      child: Stack(children: [
-        // Base color — animated by parent rebuild
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 900),
-          curve: Curves.easeOutCubic,
-          color: theme.bg,
-        ),
-        // Top-right bloom
-        Positioned(
-          top: -80,
-          right: -80,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 900),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 1200),
             curve: Curves.easeOutCubic,
-            width: 340,
-            height: 340,
+            color: theme.bg,
+          ),
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 1200),
+            curve: Curves.easeOutCubic,
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: theme.blobA,
-                  blurRadius: 140,
-                  spreadRadius: 60,
-                )
-              ],
+              gradient: RadialGradient(
+                center: const Alignment(0, -0.35),
+                radius: 1.0,
+                colors: [
+                  theme.accent.withValues(alpha: 0.07),
+                  Colors.transparent,
+                ],
+              ),
             ),
           ),
-        ),
-        // Bottom-left bloom
-        Positioned(
-          bottom: 60,
-          left: -110,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 900),
-            curve: Curves.easeOutCubic,
-            width: 270,
-            height: 270,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: theme.blobB,
-                  blurRadius: 110,
-                  spreadRadius: 40,
-                )
-              ],
-            ),
-          ),
-        ),
-      ]),
+        ],
+      ),
     );
   }
 }
@@ -583,6 +676,7 @@ void overlayPopUp() {
 }
 
 // ─── Overlay screen ───────────────────────────────────────────────────────
+
 class OverlayScreen extends StatefulWidget {
   const OverlayScreen({super.key});
   @override
@@ -600,6 +694,10 @@ class _OverlayScreenState extends State<OverlayScreen> {
   }
 
   Future<void> _load() async {
+    // Clear the heads-up notification once the overlay is visible
+    final plugin = FlutterLocalNotificationsPlugin();
+    await plugin.cancel(0);
+    
     final h = await _readHydration();
     if (!mounted) return;
     setState(() => _hydration = h);
@@ -614,9 +712,7 @@ class _OverlayScreenState extends State<OverlayScreen> {
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Stack(children: [
-        // Full background — uses same _Bg widget, fully opaque
         _Bg(theme: theme),
-
         SafeArea(
           bottom: false,
           child: Padding(
@@ -625,121 +721,66 @@ class _OverlayScreenState extends State<OverlayScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const Spacer(),
-
                 Center(
-                    child: HydrationHero(hydration: _hydration, theme: theme)),
-                const SizedBox(height: 24),
-
-                // State card
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 500),
-                  padding: const EdgeInsets.fromLTRB(18, 15, 18, 15),
-                  decoration: BoxDecoration(
-                    color: theme.surface,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: theme.border, width: 1),
-                    boxShadow: [
-                      BoxShadow(
-                        color: theme.accent.withOpacity(0.12),
-                        blurRadius: 16,
-                        offset: const Offset(0, 4),
-                      )
-                    ],
+                    child:
+                        AnimatedFlower(hydration: _hydration, width: 200)),
+                const SizedBox(height: 20),
+                Center(
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween(end: _hydration),
+                    duration: const Duration(milliseconds: 1100),
+                    curve: Curves.easeOutCubic,
+                    builder: (_, animH, __) {
+                      final p = (animH * 100).round();
+                      return Text(
+                        '$p%',
+                        style: TextStyle(
+                          fontSize: 52,
+                          fontWeight: FontWeight.w900,
+                          color: theme.accent,
+                          letterSpacing: -3,
+                          height: 1.0,
+                        ),
+                      );
+                    },
                   ),
-                  child: Row(children: [
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 500),
-                      width: 46,
-                      height: 46,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: theme.accent.withOpacity(0.12),
-                      ),
-                      child: Center(
-                        child: Text(state.emoji,
-                            style: const TextStyle(fontSize: 22)),
+                ),
+                const SizedBox(height: 6),
+                Center(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 350),
+                    child: Text(
+                      state.message,
+                      key: ValueKey(state.message),
+                      style: TextStyle(
+                        color: theme.textSecondary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                        child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 350),
-                          transitionBuilder: (child, animation) =>
-                              FadeTransition(
-                            opacity: animation,
-                            child: SlideTransition(
-                              position: Tween<Offset>(
-                                begin: const Offset(0.0, 0.2),
-                                end: Offset.zero,
-                              ).animate(animation),
-                              child: child,
-                            ),
-                          ),
-                          child: Text(state.name,
-                              key: ValueKey(state.name),
-                              style: TextStyle(
-                                color: theme.accent,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: -0.2,
-                              )),
-                        ),
-                        const SizedBox(height: 2),
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 350),
-                          transitionBuilder: (child, animation) =>
-                              FadeTransition(
-                            opacity: animation,
-                            child: SlideTransition(
-                              position: Tween<Offset>(
-                                begin: const Offset(0.0, 0.2),
-                                end: Offset.zero,
-                              ).animate(animation),
-                              child: child,
-                            ),
-                          ),
-                          child: Text(state.message,
-                              key: ValueKey(state.message),
-                              style: TextStyle(
-                                color: theme.textSecondary,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              )),
-                        ),
-                      ],
-                    )),
-                  ]),
+                  ),
                 ),
-
                 const Spacer(),
-
-                // CTA
                 SizedBox(
-                  height: 60,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 500),
-                    child: ElevatedButton.icon(
-                      onPressed: () async {
-                        final h = await _drink();
-                        if (mounted) setState(() => _hydration = h);
-                        await OverlayPopUp.closeOverlay();
-                      },
-                      icon: const Icon(Icons.water_drop_rounded, size: 20),
-                      label: const Text('I watered the flower!'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: theme.accent,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        textStyle: const TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: -0.3),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20)),
-                      ),
+                  height: 58,
+                  child: ElevatedButton.icon(
+                    onPressed: () async {
+                      final h = await _drink();
+                      if (mounted) setState(() => _hydration = h);
+                      await OverlayPopUp.closeOverlay();
+                    },
+                    icon: const Icon(Icons.water_drop_rounded, size: 20),
+                    label: const Text('Water me!'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.accent,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      textStyle: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.3),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(22)),
                     ),
                   ),
                 ),
@@ -754,7 +795,7 @@ class _OverlayScreenState extends State<OverlayScreen> {
                       padding: const EdgeInsets.symmetric(vertical: 14)),
                   child: Text('Not now',
                       style: TextStyle(
-                        color: theme.textSecondary,
+                        color: theme.textMuted,
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
                       )),
@@ -808,7 +849,10 @@ void main() async {
         .setForegroundNotificationPresentationOptions(
             alert: false, badge: false, sound: false);
     await _initLocalNotifications();
-    runApp(const MaterialApp(home: HomePage()));
+    runApp(const MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: HomePage(),
+    ));
   } catch (e) {
     runApp(MaterialApp(
       home: Scaffold(
@@ -818,7 +862,10 @@ void main() async {
   }
 }
 
-// ─── Home ─────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  HOME PAGE
+// ═══════════════════════════════════════════════════════════════════════════
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
   @override
@@ -848,16 +895,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         const Duration(seconds: 5), (_) => unawaited(_pullHydration()));
 
     FirebaseMessaging.onMessage.listen((m) async {
-      if (m.data['type'] == 'water_reminder' && !await OverlayPopUp.isActive())
+      if (m.data['type'] == 'water_reminder' &&
+          !_isQuietHours() &&
+          !await OverlayPopUp.isActive()) {
         await _showReminderOverlay();
+      }
     });
     FirebaseMessaging.onMessageOpenedApp.listen((m) async {
-      if (m.data['type'] == 'water_reminder' && !await OverlayPopUp.isActive())
+      if (m.data['type'] == 'water_reminder' &&
+          !_isQuietHours() &&
+          !await OverlayPopUp.isActive()) {
         await _showReminderOverlay();
+      }
     });
     FirebaseMessaging.instance.getInitialMessage().then((m) async {
-      if (m?.data['type'] == 'water_reminder' && !await OverlayPopUp.isActive())
+      if (m?.data['type'] == 'water_reminder' &&
+          !_isQuietHours() &&
+          !await OverlayPopUp.isActive()) {
         await _showReminderOverlay();
+      }
     });
   }
 
@@ -886,7 +942,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final h = await _drink();
     if (!mounted) return;
     setState(() => _hydration = h);
-    _snack('Your flower thanks you 🌸');
+    const msgs = [
+      'Ahhh, refreshing! 💧',
+      'Your flower loves you! 🌸',
+      'Hydration = happiness ✨',
+    ];
+    _snack(msgs[DateTime.now().second % msgs.length]);
   }
 
   Future<void> _init() async {
@@ -947,7 +1008,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         body: jsonEncode({
           'deviceId': deviceId,
           'fcmToken': token,
-          'intervalMinutes': _intervalMinutes
+          'intervalMinutes': _intervalMinutes,
+          'timezoneOffsetMinutes': DateTime.now().timeZoneOffset.inMinutes,
         }),
       );
       if (res.statusCode == 200) {
@@ -1127,115 +1189,116 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   // ─── Build ─────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     final bottom = MediaQuery.of(context).padding.bottom;
-    // Single source of truth — everything reads from this
     final theme = HydrationTheme.of(_hydration);
     final state = FlowerState.of(_hydration);
 
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Stack(children: [
-        // Animated full-screen background
         _Bg(theme: theme),
-
         SafeArea(
           bottom: false,
-          child: CustomScrollView(
+          child: SingleChildScrollView(
             physics: const BouncingScrollPhysics(),
-            slivers: [
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
-                sliver: SliverToBoxAdapter(child: _appBar(theme)),
-              ),
-              SliverPadding(
-                padding: EdgeInsets.fromLTRB(24, 36, 24, bottom + 48),
-                sliver: SliverList(
-                    delegate: SliverChildListDelegate([
-                  // Hero
-                  Center(
-                      child:
-                          HydrationHero(hydration: _hydration, theme: theme)),
-                  const SizedBox(height: 20),
+            padding: EdgeInsets.fromLTRB(24, 16, 24, bottom + 40),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _appBar(theme),
+                const SizedBox(height: 28),
 
-                  // State card
-                  _stateCard(theme, state),
-                  const SizedBox(height: 40),
+                // The flower — centerpiece
+                Center(
+                    child:
+                        AnimatedFlower(hydration: _hydration, width: 260)),
+                const SizedBox(height: 20),
 
-                  // Drink CTA
-                  _drinkButton(theme),
-                  const SizedBox(height: 52),
+                // Percentage
+                Center(child: _percentDisplay(theme)),
+                const SizedBox(height: 4),
 
-                  // Interval
-                  _sectionLabel('Remind me every', theme),
-                  const SizedBox(height: 14),
-                  _intervalChips(theme),
-                  const SizedBox(height: 12),
-                  _startButton(theme),
-                  const SizedBox(height: 52),
+                // Status message
+                Center(child: _statusDisplay(theme, state)),
+                const SizedBox(height: 28),
 
-                  // Setup
-                  _sectionLabel('Setup', theme),
-                  const SizedBox(height: 14),
-                  _permTile(
-                    label: 'Display overlay',
-                    sub: 'Show reminders over other apps',
-                    done: _overlayPermissionDone,
-                    onTap: _handleOverlayPermission,
-                    theme: theme,
+                // Water button
+                _waterButton(theme),
+                const SizedBox(height: 32),
+
+                // Interval section
+                _sectionLabel('Remind me every', theme),
+                const SizedBox(height: 12),
+                _intervalChips(theme),
+                const SizedBox(height: 12),
+                _startButton(theme),
+                const SizedBox(height: 12),
+                _quietHoursIndicator(theme),
+                const SizedBox(height: 48),
+
+                // Setup section
+                _sectionLabel('Setup', theme),
+                const SizedBox(height: 12),
+                _permTile(
+                  label: 'Display overlay',
+                  sub: 'Show reminders over other apps',
+                  done: _overlayPermissionDone,
+                  onTap: _handleOverlayPermission,
+                  theme: theme,
+                ),
+                const SizedBox(height: 8),
+                _permTile(
+                  label: 'Background activity',
+                  sub: 'Allow autostart and background running',
+                  done: _backgroundActivityDone,
+                  onTap: _handleBackgroundActivityPermission,
+                  theme: theme,
+                ),
+                const SizedBox(height: 8),
+                _permTile(
+                  label: 'Battery limit',
+                  sub: 'Set battery use to unrestricted',
+                  done: _batteryLimitDone,
+                  onTap: _handleBatteryLimitPermission,
+                  theme: theme,
+                ),
+                if (_overlayPermissionDone &&
+                    _backgroundActivityDone &&
+                    _batteryLimitDone)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 18),
+                    child: Center(
+                        child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                                shape: BoxShape.circle, color: theme.accent)),
+                        const SizedBox(width: 8),
+                        Text('All systems active',
+                            style: TextStyle(
+                              color: theme.accent,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.2,
+                            )),
+                      ],
+                    )),
                   ),
-                  const SizedBox(height: 10),
-                  _permTile(
-                    label: 'Background activity',
-                    sub: 'Allow autostart and background running',
-                    done: _backgroundActivityDone,
-                    onTap: _handleBackgroundActivityPermission,
-                    theme: theme,
-                  ),
-                  const SizedBox(height: 10),
-                  _permTile(
-                    label: 'Battery limit',
-                    sub: 'Set battery use to unrestricted',
-                    done: _batteryLimitDone,
-                    onTap: _handleBatteryLimitPermission,
-                    theme: theme,
-                  ),
-                  if (_overlayPermissionDone &&
-                      _backgroundActivityDone &&
-                      _batteryLimitDone)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 20),
-                      child: Center(
-                          child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                              width: 6,
-                              height: 6,
-                              decoration: BoxDecoration(
-                                  shape: BoxShape.circle, color: theme.accent)),
-                          const SizedBox(width: 8),
-                          Text('All systems active',
-                              style: TextStyle(
-                                color: theme.accent,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.2,
-                              )),
-                        ],
-                      )),
-                    ),
-                ])),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ]),
     );
   }
 
-  // ─── Sub-widgets — all accept HydrationTheme ────────────────────────────
+  // ─── Sub-widgets ───────────────────────────────────────────────────────
 
   Widget _appBar(HydrationTheme t) => Row(
         crossAxisAlignment: CrossAxisAlignment.center,
@@ -1258,7 +1321,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 AnimatedDefaultTextStyle(
                   duration: const Duration(milliseconds: 600),
                   style: TextStyle(
-                      color: t.textSecondary,
+                      color: t.textMuted,
                       fontSize: 12,
                       fontWeight: FontWeight.w500),
                   child: Text(_status),
@@ -1302,102 +1365,65 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ],
       );
 
-  Widget _stateCard(HydrationTheme t, FlowerState state) => AnimatedContainer(
-        duration: const Duration(milliseconds: 600),
+  Widget _percentDisplay(HydrationTheme t) =>
+      TweenAnimationBuilder<double>(
+        tween: Tween(end: _hydration),
+        duration: const Duration(milliseconds: 1100),
         curve: Curves.easeOutCubic,
-        padding: const EdgeInsets.fromLTRB(18, 15, 18, 15),
-        decoration: BoxDecoration(
-          color: t.surface,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: t.border, width: 1),
-          boxShadow: [
-            BoxShadow(
-              color: t.accent.withOpacity(0.10),
-              blurRadius: 14,
-              offset: const Offset(0, 4),
-            )
-          ],
-        ),
-        child: Row(children: [
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 500),
-            width: 48,
-            height: 48,
-            decoration:
-                BoxDecoration(shape: BoxShape.circle, color: t.chipSelected),
-            child: Center(
-                child: Text(state.emoji, style: const TextStyle(fontSize: 24))),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-              child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 350),
-                transitionBuilder: (child, animation) => FadeTransition(
-                  opacity: animation,
-                  child: SlideTransition(
-                    position: Tween<Offset>(
-                      begin: const Offset(0.0, 0.2),
-                      end: Offset.zero,
-                    ).animate(animation),
-                    child: child,
-                  ),
-                ),
-                child: Text(state.name,
-                    key: ValueKey(state.name),
-                    style: TextStyle(
-                      color: t.accent,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.3,
-                    )),
-              ),
-              const SizedBox(height: 2),
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 350),
-                transitionBuilder: (child, animation) => FadeTransition(
-                  opacity: animation,
-                  child: SlideTransition(
-                    position: Tween<Offset>(
-                      begin: const Offset(0.0, 0.2),
-                      end: Offset.zero,
-                    ).animate(animation),
-                    child: child,
-                  ),
-                ),
-                child: Text(state.message,
-                    key: ValueKey(state.message),
-                    style: TextStyle(
-                        color: t.textSecondary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500)),
-              ),
-            ],
-          )),
-        ]),
+        builder: (_, h, __) {
+          final p = (h * 100).round();
+          return Text(
+            '$p%',
+            style: TextStyle(
+              fontSize: 64,
+              fontWeight: FontWeight.w900,
+              color: t.accent,
+              letterSpacing: -4,
+              height: 1.0,
+            ),
+          );
+        },
       );
 
-  Widget _drinkButton(HydrationTheme t) => SizedBox(
-        height: 60,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 600),
-          child: ElevatedButton.icon(
-            onPressed: _markDrink,
-            icon: const Icon(Icons.water_drop_rounded, size: 20),
-            label: const Text('I watered the flower!'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: t.accent,
-              foregroundColor: Colors.white,
-              elevation: 0,
-              textStyle: const TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -0.3),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20)),
-            ),
+  Widget _statusDisplay(HydrationTheme t, FlowerState state) =>
+      AnimatedSwitcher(
+        duration: const Duration(milliseconds: 400),
+        transitionBuilder: (child, anim) => FadeTransition(
+          opacity: anim,
+          child: SlideTransition(
+            position:
+                Tween<Offset>(begin: const Offset(0, 0.15), end: Offset.zero)
+                    .animate(anim),
+            child: child,
+          ),
+        ),
+        child: Text(
+          state.message,
+          key: ValueKey(state.message),
+          style: TextStyle(
+            color: t.textSecondary,
+            fontSize: 16,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      );
+
+  Widget _waterButton(HydrationTheme t) => SizedBox(
+        height: 58,
+        child: ElevatedButton.icon(
+          onPressed: _markDrink,
+          icon: const Icon(Icons.water_drop_rounded, size: 20),
+          label: const Text('Water me!'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: t.accent,
+            foregroundColor: Colors.white,
+            elevation: 0,
+            textStyle: const TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.3),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(22)),
           ),
         ),
       );
@@ -1427,22 +1453,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 250),
               curve: Curves.easeOutCubic,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
               decoration: BoxDecoration(
                 color: sel ? t.chipSelected : t.surface,
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(
                     color: sel ? t.chipBorderSelected : t.border, width: 1),
-                boxShadow: sel
-                    ? []
-                    : [
-                        BoxShadow(
-                          color:
-                              Colors.black.withOpacity(0.04 + (1 - t.h) * 0.04),
-                          blurRadius: 6,
-                          offset: const Offset(0, 2),
-                        )
-                      ],
               ),
               child: AnimatedDefaultTextStyle(
                 duration: const Duration(milliseconds: 400),
@@ -1461,34 +1478,57 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Widget _startButton(HydrationTheme t) => SizedBox(
         height: 52,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 600),
-          child: OutlinedButton(
-            onPressed: _busy ? null : _register,
-            style: OutlinedButton.styleFrom(
-              foregroundColor: t.accent,
-              side: BorderSide(color: t.accent.withOpacity(0.30), width: 1),
-              backgroundColor: t.accent.withOpacity(0.07),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16)),
+        child: OutlinedButton(
+          onPressed: _busy ? null : _register,
+          style: OutlinedButton.styleFrom(
+            foregroundColor: t.accent,
+            side: BorderSide(color: t.accent.withValues(alpha: 0.30), width: 1),
+            backgroundColor: t.accent.withValues(alpha: 0.07),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16)),
+          ),
+          child: AnimatedDefaultTextStyle(
+            duration: const Duration(milliseconds: 400),
+            style: TextStyle(
+              color: t.accent,
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.2,
             ),
-            child: AnimatedDefaultTextStyle(
-              duration: const Duration(milliseconds: 400),
-              style: TextStyle(
-                color: t.accent,
-                fontSize: 15,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.2,
-              ),
-              child: Text(_busy
-                  ? 'Please wait...'
-                  : _registered
-                      ? 'Update interval'
-                      : 'Start reminders'),
-            ),
+            child: Text(_busy
+                ? 'Please wait...'
+                : _registered
+                    ? 'Update interval'
+                    : 'Start reminders'),
           ),
         ),
       );
+
+  Widget _quietHoursIndicator(HydrationTheme t) {
+    final quiet = _isQuietHours();
+    final message = quiet
+        ? '🌙 Reminders paused until 6:00 AM'
+        : '💧 Active from 6 AM – 10 PM';
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 500),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: t.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: t.border, width: 1),
+      ),
+      child: Text(
+        message,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: quiet ? t.textMuted : t.accent,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          letterSpacing: -0.1,
+        ),
+      ),
+    );
+  }
 
   Widget _permTile({
     required String label,
@@ -1507,15 +1547,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             color: theme.surface,
             borderRadius: BorderRadius.circular(18),
             border: Border.all(
-                color: done ? theme.accent.withOpacity(0.28) : theme.border,
+                color: done ? theme.accent.withValues(alpha: 0.28) : theme.border,
                 width: 1),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.04 + (1 - theme.h) * 0.04),
-                blurRadius: 8,
-                offset: const Offset(0, 2),
-              )
-            ],
           ),
           child: Row(children: [
             AnimatedContainer(
