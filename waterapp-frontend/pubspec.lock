@@ -288,14 +288,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.17.0"
-  overlay_pop_up:
-    dependency: "direct main"
-    description:
-      name: overlay_pop_up
-      sha256: ea9a006152b01a909dbf7296be64c4a3ee5bc2f54821ebba96154222008e45da
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.0.6+6"
   path:
     dependency: transitive
     description:
@@ -583,4 +575,4 @@ packages:
     version: "6.6.1"
 sdks:
   dart: ">=3.9.0 <4.0.0"
-  flutter: ">=3.35.4"
+  flutter: ">=3.35.0"

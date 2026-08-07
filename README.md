@@ -99,7 +99,7 @@ The backend requires these environment variables (set in Vercel dashboard):
 | `FIREBASE_PROJECT_ID` | Firebase project ID |
 | `FIREBASE_CLIENT_EMAIL` | Firebase service account email |
 | `FIREBASE_PRIVATE_KEY` | Firebase service account private key |
-| `CRON_SECRET` | Auth for `/api/remind` |
+| `CRON_SECRET` | Auth for `/api/remind` (header `x-secret`) |
 | `REGISTER_SECRET` | Auth for `/api/register` |
 | `LOG_SECRET` | Auth for `/api/log` |
 

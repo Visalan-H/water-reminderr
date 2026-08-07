@@ -1,6 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -14,6 +13,13 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
 
+        <!--
+            showWhenLocked + turnScreenOn here are the manifest-level hints.
+            MainActivity.kt also sets them programmatically via Activity APIs
+            (API 27+) or window flags (API < 27) when it detects a notification
+            launch, because the manifest attributes alone are insufficient on
+            some OEMs (e.g. MIUI ignores them without the programmatic call).
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

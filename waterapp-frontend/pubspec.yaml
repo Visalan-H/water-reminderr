@@ -9,7 +9,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  overlay_pop_up: 1.0.6+6
   device_info_plus: ^10.0.0
   firebase_core: ^3.0.0
   firebase_messaging: ^15.0.0

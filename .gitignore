@@ -13,9 +13,15 @@ waterapp/
 .env
 .env.local
 build-release.bat
+google-services.json
+
+# Debris
+diff.txt
 
 # AI / Assistant workspaces/logs
 .commandcode/
+.claude/
+CLAUDE.md
 todo.md
 context.md
 senior_dev_review.md
