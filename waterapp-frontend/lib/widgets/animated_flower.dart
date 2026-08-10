@@ -13,6 +13,11 @@ import '../painters/flower_painter.dart';
 /// falling petals. Set [animate] to false to disable the idle sway (used on
 /// the lock-screen overlay to keep things calm).
 class AnimatedFlower extends StatefulWidget {
+  /// How long a hydration change takes to fully play out. Public so callers
+  /// that want to wait for the flower to settle before moving on (e.g. the
+  /// reminder overlay before it closes itself) don't have to hardcode it.
+  static const Duration transitionDuration = Duration(milliseconds: 1400);
+
   final double hydration;
   final double width;
   final bool animate;
@@ -29,7 +34,6 @@ class AnimatedFlower extends StatefulWidget {
 
 class _AnimatedFlowerState extends State<AnimatedFlower>
     with SingleTickerProviderStateMixin {
-  static const Duration _transitionDuration = Duration(milliseconds: 1400);
   static const Duration _swayPeriod = Duration(milliseconds: 6000);
   // Ambient sway is driven by a low-rate Timer rather than a 60fps+
   // AnimationController — the sway is slow and subtle, so an 8fps update
@@ -51,17 +55,18 @@ class _AnimatedFlowerState extends State<AnimatedFlower>
     super.initState();
     _from = widget.hydration;
     _to = widget.hydration;
-    _transition =
-        AnimationController(vsync: this, duration: _transitionDuration)
-          ..value = 1.0;
+    _transition = AnimationController(
+        vsync: this, duration: AnimatedFlower.transitionDuration)
+      ..value = 1.0;
     if (widget.animate) _startSway();
   }
 
   void _startSway() {
     _swayTimer ??= Timer.periodic(_swayTick, (_) {
       setState(() {
-        _swayPhase =
-            (_swayPhase + _swayTick.inMilliseconds / _swayPeriod.inMilliseconds) % 1.0;
+        _swayPhase = (_swayPhase +
+                _swayTick.inMilliseconds / _swayPeriod.inMilliseconds) %
+            1.0;
       });
     });
   }
