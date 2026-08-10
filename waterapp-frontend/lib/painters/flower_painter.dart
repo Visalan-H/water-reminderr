@@ -143,7 +143,7 @@ class FlowerPainter extends CustomPainter {
     _drawLeaf(canvas, stemP0, stemP1, stemP2, 0.60, leafColor, w * 0.085, false, leafH);
 
     // ── Draw petals ──
-    final petalCount = FlowerWiltFrame.petalCount;
+    const petalCount = FlowerWiltFrame.petalCount;
     final petalLen = w * 0.115 * (0.50 + colorH * 0.50);
     final petalWid = w * 0.058 * (0.35 + colorH * 0.65);
     final petalBaseAngles = List<double>.generate(

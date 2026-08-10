@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/hydration_store.dart';
+import '../core/notifications.dart';
 import '../theme/hydration_theme.dart';
 import '../widgets/animated_flower.dart';
 import '../widgets/app_background.dart';
@@ -22,6 +23,10 @@ class _OverlayScreenState extends State<OverlayScreen> {
   void initState() {
     super.initState();
     unawaited(_load());
+    // The reminder has been delivered — clear it so it can't sit in the shade
+    // and suppress the full-screen intent for the next one (see
+    // reminderNotificationId).
+    unawaited(localNotifications.cancel(reminderNotificationId));
   }
 
   Future<void> _load() async {

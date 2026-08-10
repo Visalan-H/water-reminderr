@@ -20,6 +20,7 @@ import '../core/hydration_store.dart';
 import '../core/notifications.dart';
 import '../core/remote_log.dart';
 import '../theme/hydration_theme.dart';
+import 'overlay_screen.dart';
 import '../widgets/animated_flower.dart';
 import '../widgets/app_background.dart';
 import '../widgets/hydration_badge.dart';
@@ -40,6 +41,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _registered = false;
   bool _busy = false;
   bool _overlayPermissionDone = false;
+  bool _drawOverlayDone = false;
   bool _batteryLimitDone = false;
   bool _backgroundActivityDone = false;
   bool _miuiAlertDone = false;
@@ -105,9 +107,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      unawaited(_showPendingReminder());
       unawaited(_pullHydration());
       unawaited(_refreshPermissions());
     }
+  }
+
+  /// When the background isolate force-starts the activity and this state is
+  /// already alive, Android delivers onNewIntent rather than re-running main(),
+  /// so the reminder flag never gets read at startup. Catching it on resume
+  /// covers that case.
+  Future<void> _showPendingReminder() async {
+    if (!await consumePendingReminder()) return;
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const OverlayScreen()),
+    );
   }
 
   Future<void> _setHydrationDebug(double value) async {
@@ -238,6 +253,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _refreshPermissions() async {
     final prefs = await SharedPreferences.getInstance();
     final fullScreenPermDone = await isFullScreenIntentGranted();
+    final drawOverlayDone = await isOverlayPermissionGranted();
     final batteryLimitDone = await isBatteryLimitDone();
     final backgroundActivityDone = prefs.getBool(backgroundActivityDoneKey) ??
         prefs.getBool(legacyBatteryPermissionDoneKey) ??
@@ -246,10 +262,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() {
       _overlayPermissionDone = fullScreenPermDone;
+      _drawOverlayDone = drawOverlayDone;
       _batteryLimitDone = batteryLimitDone;
       _backgroundActivityDone = backgroundActivityDone;
       _miuiAlertDone = miuiAlertDone;
     });
+  }
+
+  Future<void> _handleDrawOverlayPermission() async {
+    await requestOverlayPermission();
+    await _refreshPermissions();
+    if (_drawOverlayDone) _snack('Reminders can now take over the screen ✓');
   }
 
   Future<void> _dismissSetupIntro() async {
@@ -267,7 +290,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await (impl as dynamic).requestFullScreenIntentPermission();
     } catch (_) {
       // Fallback: open app notification settings
-      await AndroidIntent(
+      await const AndroidIntent(
         action: 'android.settings.APP_NOTIFICATION_SETTINGS',
         arguments: {'android.provider.extra.APP_PACKAGE': appPackage},
       ).launch();
@@ -286,7 +309,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // Standard ACTION_CHANNEL_NOTIFICATION_SETTINGS works on all Android
     // versions >= 8 including MIUI; it opens directly to the right channel.
     try {
-      await AndroidIntent(
+      await const AndroidIntent(
         action: 'android.settings.CHANNEL_NOTIFICATION_SETTINGS',
         arguments: {
           'android.provider.extra.APP_PACKAGE': appPackage,
@@ -295,7 +318,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ).launch();
     } catch (_) {
       // Fallback: open generic app notification settings
-      await AndroidIntent(
+      await const AndroidIntent(
         action: 'android.settings.APP_NOTIFICATION_SETTINGS',
         arguments: {'android.provider.extra.APP_PACKAGE': appPackage},
       ).launch();
@@ -363,7 +386,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final status = await Permission.ignoreBatteryOptimizations.request();
       if (!status.isGranted) {
-        await AndroidIntent(
+        await const AndroidIntent(
                 action: 'android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS')
             .launch();
       }
@@ -384,7 +407,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (isXiaomiBrand(_brand)) {
         await openMiuiPermissionEditor();
       } else {
-        await AndroidIntent(
+        await const AndroidIntent(
           action: 'android.settings.APPLICATION_DETAILS_SETTINGS',
           data: 'package:$appPackage',
         ).launch();
@@ -497,6 +520,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         sub: 'Show reminders even on lock screen',
         done: _overlayPermissionDone,
         onTap: _handleOverlayPermission,
+      ),
+      SetupItem(
+        label: 'Interrupt me anywhere',
+        sub: 'Required to take over the screen while you\'re using the phone',
+        done: _drawOverlayDone,
+        onTap: _handleDrawOverlayPermission,
       ),
       SetupItem(
         label: 'Background activity',

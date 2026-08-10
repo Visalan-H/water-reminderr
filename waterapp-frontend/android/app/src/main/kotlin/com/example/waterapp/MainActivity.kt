@@ -1,11 +1,59 @@
 package com.example.waterreminder
 
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+
+    private val channelName = "com.example.waterreminder/fullscreen_intent"
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        // flutter_local_notifications 17.2.4 doesn't expose a check-only
+        // Dart API for the Android 14+ USE_FULL_SCREEN_INTENT permission —
+        // only a request method that opens Settings as a side effect. This
+        // channel lets the Dart side query the current grant state without
+        // triggering any UI, so the setup checklist can show an accurate
+        // status instead of assuming "granted" whenever the plugin call fails.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "canUseFullScreenIntent" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            val nm =
+                                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                            result.success(nm.canUseFullScreenIntent())
+                        } else {
+                            result.success(true)
+                        }
+                    }
+                    // "Display over other apps". We never draw an overlay with
+                    // it — holding it is what exempts the app from background
+                    // activity-start limits, which is the only supported way to
+                    // put the reminder on screen while the phone is in use.
+                    "canDrawOverlays" -> result.success(Settings.canDrawOverlays(this))
+                    "requestOverlayPermission" -> {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Set window flags so this activity can appear over the lock screen

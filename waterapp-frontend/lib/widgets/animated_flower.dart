@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -27,12 +28,18 @@ class AnimatedFlower extends StatefulWidget {
 }
 
 class _AnimatedFlowerState extends State<AnimatedFlower>
-    with TickerProviderStateMixin {
+    with SingleTickerProviderStateMixin {
   static const Duration _transitionDuration = Duration(milliseconds: 1400);
   static const Duration _swayPeriod = Duration(milliseconds: 6000);
+  // Ambient sway is driven by a low-rate Timer rather than a 60fps+
+  // AnimationController — the sway is slow and subtle, so an 8fps update
+  // is visually indistinguishable while avoiding a screen-refresh-rate
+  // repaint loop that runs for as long as the flower is on screen.
+  static const Duration _swayTick = Duration(milliseconds: 125);
 
   late final AnimationController _transition;
-  late final AnimationController _ambient;
+  Timer? _swayTimer;
+  double _swayPhase = 0;
   final math.Random _rng = math.Random();
   final List<FallingPetal> _particles = [];
 
@@ -47,8 +54,21 @@ class _AnimatedFlowerState extends State<AnimatedFlower>
     _transition =
         AnimationController(vsync: this, duration: _transitionDuration)
           ..value = 1.0;
-    _ambient = AnimationController(vsync: this, duration: _swayPeriod);
-    if (widget.animate) _ambient.repeat();
+    if (widget.animate) _startSway();
+  }
+
+  void _startSway() {
+    _swayTimer ??= Timer.periodic(_swayTick, (_) {
+      setState(() {
+        _swayPhase =
+            (_swayPhase + _swayTick.inMilliseconds / _swayPeriod.inMilliseconds) % 1.0;
+      });
+    });
+  }
+
+  void _stopSway() {
+    _swayTimer?.cancel();
+    _swayTimer = null;
   }
 
   @override
@@ -67,10 +87,10 @@ class _AnimatedFlowerState extends State<AnimatedFlower>
         ..forward(from: 0.0);
     }
 
-    if (widget.animate && !_ambient.isAnimating) {
-      _ambient.repeat();
-    } else if (!widget.animate && _ambient.isAnimating) {
-      _ambient.stop();
+    if (widget.animate && _swayTimer == null) {
+      _startSway();
+    } else if (!widget.animate && _swayTimer != null) {
+      _stopSway();
     }
   }
 
@@ -92,7 +112,7 @@ class _AnimatedFlowerState extends State<AnimatedFlower>
   @override
   void dispose() {
     _transition.dispose();
-    _ambient.dispose();
+    _swayTimer?.cancel();
     super.dispose();
   }
 
@@ -102,7 +122,7 @@ class _AnimatedFlowerState extends State<AnimatedFlower>
 
     return RepaintBoundary(
       child: AnimatedBuilder(
-        animation: Listenable.merge([_transition, _ambient]),
+        animation: _transition,
         builder: (_, __) {
           final now = DateTime.now();
           _particles.removeWhere((p) => p.isExpired(now));
@@ -111,7 +131,7 @@ class _AnimatedFlowerState extends State<AnimatedFlower>
             from: _from,
             to: _to,
             progress: _transition.value,
-            swayPhase: _ambient.value,
+            swayPhase: _swayPhase,
           );
 
           return CustomPaint(

@@ -1,8 +1,3 @@
-# Google Play Core & Split Install
--keep class com.google.android.play.core.** { *; }
--keep class com.google.android.play.** { *; }
--dontwarn com.google.android.play.**
-
 # Firebase & Google Services
 -keep class com.google.firebase.** { *; }
 -keep class com.google.android.gms.** { *; }
@@ -14,6 +9,13 @@
 -keep class io.flutter.plugins.** { *; }
 -keep class io.flutter.embedding.** { *; }
 
+# Flutter's embedding references Play Core split-install classes for deferred
+# components (dynamic feature modules). This app doesn't use deferred
+# components and doesn't depend on Play Core, so those classes don't exist
+# for R8 to resolve — silence rather than keep (keeping would pull in a
+# dependency we don't have and defeat shrinking for no benefit).
+-dontwarn com.google.android.play.core.**
+
 # Android Intent Plus
 -keep class com.android.intent.** { *; }
 
@@ -22,9 +24,6 @@
 
 # Permission Handler
 -keep class com.baseflow.permissionhandler.** { *; }
-
-# Overlay PopUp
--keep class android.overlay.** { *; }
 
 # Shared Preferences
 -keep class android.content.SharedPreferences { *; }

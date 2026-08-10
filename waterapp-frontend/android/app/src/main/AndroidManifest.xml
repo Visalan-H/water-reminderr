@@ -8,6 +8,18 @@
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
+    <!--
+        Not used to draw an overlay (that approach was tried and abandoned).
+        It is declared because holding it exempts the app from Android's
+        background-activity-start restrictions, which is what lets the
+        full-screen intent actually bring MainActivity up from a killed state.
+        On Xiaomi/MIUI it is also the backing permission for "Display pop-up
+        windows while running in background" — without this declaration that
+        toggle does not even appear for the app, and MIUI silently downgrades
+        every full-screen intent to a small banner.
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:label="Water Reminder"
         android:name="${applicationName}"

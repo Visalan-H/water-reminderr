@@ -7,7 +7,9 @@ Thumbs.db
 *.tmp
 
 # Stale folders
-waterapp/
+# Anchored to the repo root on purpose: an unanchored "waterapp/" also matches
+# the Kotlin source dir at android/app/src/main/kotlin/com/example/waterapp/.
+/waterapp/
 
 # Environment and Secrets (already ignored in subdirs, but added here for safety)
 .env
