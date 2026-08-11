@@ -18,7 +18,7 @@ class FlowerState {
       return const FlowerState._('Thirsty', 'Could use some water', 3);
     }
     if (h >= 0.25) return const FlowerState._('Wilting', "Not doing so great", 2);
-    if (h >= 0.12) return const FlowerState._('Drying', 'I need water badly', 1);
+    if (h >= 0.12) return const FlowerState._('Dying', 'I need water badly', 1);
     return const FlowerState._('SOS', "Water required urgently", 0);
   }
 }

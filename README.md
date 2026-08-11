@@ -20,11 +20,11 @@ Android app that keeps you hydrated with a living flower that responds to your d
 
 ## How It Works
 
-1. Open the app, grant permissions (overlay, notifications, battery)
+1. Open the app and work through the setup checklist (full-screen reminders, "Interrupt me anywhere", battery, background activity)
 2. Pick your reminder interval and tap **Start**
 3. The app registers with the backend via FCM
 4. A cron job sends push notifications at your interval
-5. Full-screen overlay appears — tap **Water me!** or dismiss
+5. The reminder takes over the screen — even while you're using the phone — tap **I drank water!** or **Let it wither**
 6. Your flower reflects your hydration level in real time
 
 ## Flower States
@@ -105,10 +105,11 @@ The backend requires these environment variables (set in Vercel dashboard):
 
 ### Permissions Required
 
-- **Display overlay** — Show reminders over other apps
 - **Notifications** — Post reminder notifications
+- **Full-screen reminders** — Show the reminder over the lock screen (Android 14+ requires granting this manually; the app walks you through it)
+- **Interrupt me anywhere** ("Display over other apps") — Lets the reminder take over the screen even while you're actively using the phone, not just when it's locked
 - **Battery unrestricted** — Prevent OS from killing the background handler
-- **Background activity / Autostart** — Keep FCM handler alive
+- **Background activity / Autostart** — Keep FCM handler alive (Xiaomi/MIUI in particular needs this enabled manually)
 
 ## License
 

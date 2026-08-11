@@ -50,16 +50,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _brand = '';
   double _hydration = 1.0;
   Timer? _ticker;
+  StreamSubscription<RemoteMessage>? _onMessageSub;
+  StreamSubscription<RemoteMessage>? _onMessageOpenedAppSub;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_init());
-    _ticker = Timer.periodic(
-        const Duration(seconds: 5), (_) => unawaited(_pullHydration()));
+    _startTicker();
 
-    FirebaseMessaging.onMessage.listen((m) async {
+    _onMessageSub = FirebaseMessaging.onMessage.listen((m) async {
       if (m.data['type'] == 'water_reminder' && !isQuietHours()) {
         await showReminderOverlay(
           title: m.data['title'] ?? 'Time to water your flower',
@@ -67,7 +68,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
       }
     });
-    FirebaseMessaging.onMessageOpenedApp.listen((m) async {
+    _onMessageOpenedAppSub =
+        FirebaseMessaging.onMessageOpenedApp.listen((m) async {
       if (m.data['type'] == 'water_reminder' && !isQuietHours()) {
         await showReminderOverlay(
           title: m.data['title'] ?? 'Time to water your flower',
@@ -100,16 +102,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     _ticker?.cancel();
+    unawaited(_onMessageSub?.cancel());
+    unawaited(_onMessageOpenedAppSub?.cancel());
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _startTicker() {
+    _ticker ??= Timer.periodic(
+        const Duration(seconds: 5), (_) => unawaited(_pullHydration()));
+  }
+
+  void _stopTicker() {
+    _ticker?.cancel();
+    _ticker = null;
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _startTicker();
       unawaited(_showPendingReminder());
       unawaited(_pullHydration());
       unawaited(_refreshPermissions());
+    } else if (state == AppLifecycleState.paused) {
+      // No point polling SharedPreferences every 5s while nothing is on
+      // screen to show the result — resumed above restarts it.
+      _stopTicker();
     }
   }
 

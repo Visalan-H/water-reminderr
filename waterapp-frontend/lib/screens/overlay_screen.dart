@@ -109,7 +109,7 @@ class _OverlayScreenState extends State<OverlayScreen> {
                     const Spacer(),
                     Center(
                         child: AnimatedFlower(
-                            hydration: _hydration, width: 200, animate: false)),
+                            hydration: _hydration, width: 300, animate: false)),
                     const SizedBox(height: 20),
                     Center(
                         child: HydrationBadge(
