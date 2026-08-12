@@ -661,7 +661,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     fontWeight: FontWeight.w800,
                     letterSpacing: -0.8,
                   ),
-                  child: const Text('Flora'),
+                  child: const Text('Bloom'),
                 ),
                 const SizedBox(height: 2),
                 AnimatedDefaultTextStyle(
@@ -782,7 +782,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           children: [
             Text(
               'A few permissions keep reminders showing up even when your '
-              'phone is locked or Flora is closed.',
+              'phone is locked or Bloom is closed.',
               style: TextStyle(
                 color: t.textSecondary,
                 fontSize: 13,
