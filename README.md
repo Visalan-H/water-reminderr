@@ -1,10 +1,10 @@
-# Oasis — Water Reminder
+# Bloom
 
 Android app that keeps you hydrated with a living flower that responds to your drinking habits. Miss a reminder and it wilts. Drink up and it thrives.
 
 ## Download
 
-📱 **[Download APK (ARM64)](https://github.com/Visalan-H/water-reminderr/releases/download/v1.0.0/app-arm64-v8a-release.apk)** — Install directly on Android
+**[Download APK (ARM64)](https://github.com/Visalan-H/water-reminderr/releases/latest/download/app-arm64-v8a-release.apk)** — Install directly on Android (always the latest release)
 
 > Requires Android 5.0+ · ~17 MB · No Play Store needed
 
@@ -31,13 +31,13 @@ Android app that keeps you hydrated with a living flower that responds to your d
 
 | Level | State | Message |
 |-------|-------|---------|
-| 85-100% | Thriving! | Living my best life ✨ |
+| 85-100% | Thriving! | Living my best life |
 | 70-84% | Happy | Feeling fresh and fabulous~ |
 | 55-69% | Content | Doing okay! A sip soon? |
-| 40-54% | Thirsty | Could use some water 👀 |
+| 40-54% | Thirsty | Could use some water |
 | 25-39% | Wilting | Not doing so great... |
-| 12-24% | Dying | I need water badly! 😰 |
-| 0-11% | SOS | I'M LITERALLY DYING 💀 |
+| 12-24% | Dying | I need water badly! |
+| 0-11% | SOS | I'M LITERALLY DYING |
 
 ## Tech Stack
 
@@ -113,4 +113,4 @@ The backend requires these environment variables (set in Vercel dashboard):
 
 ## License
 
-MIT
+[MIT](LICENSE)

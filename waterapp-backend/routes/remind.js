@@ -10,6 +10,21 @@ const DEAD_TOKEN_CODES = [
     'messaging/invalid-argument',
 ];
 
+// The external cron (cron-job.org) jitters by a few seconds to ~16s per tick.
+// lastSentAt is stamped with actual completion wall-clock time, so two ticks
+// landing close together can shrink the real gap just under intervalMinutes,
+// silently skipping a cycle. This grace period lets a device fire slightly
+// early so jitter can't push it past the threshold.
+//
+// The threshold is the jitter *delta* between consecutive ticks, not the
+// absolute jitter, so 15s cut it too fine: a device whose intervalMinutes
+// equals the cron period (10min) lost roughly every other cycle, producing a
+// 10/20/10/20-minute sawtooth. Sizing this generously is safe — a device can
+// only ever be sent on a cron tick, so the next possible send is always a full
+// tick away and no grace period below one cron period can cause an early or
+// double send.
+const DUE_CHECK_GRACE_MS = 60000;
+
 function isQuietHours(timezoneOffsetMinutes) {
     const now = new Date();
     const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
@@ -28,7 +43,12 @@ router.post('/', cronAuth, async (req, res) => {
                 {
                     $expr: {
                         $lte: [
-                            { $add: ['$lastSentAt', { $multiply: ['$intervalMinutes', 60000] }] },
+                            {
+                                $subtract: [
+                                    { $add: ['$lastSentAt', { $multiply: ['$intervalMinutes', 60000] }] },
+                                    DUE_CHECK_GRACE_MS,
+                                ],
+                            },
                             now,
                         ],
                     },
