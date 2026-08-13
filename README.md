@@ -1,5 +1,7 @@
 # Bloom
 
+<img src="logo.png" alt="Bloom logo" width="120" />
+
 Android app that keeps you hydrated with a living flower that responds to your drinking habits. Miss a reminder and it wilts. Drink up and it thrives.
 
 ## Download

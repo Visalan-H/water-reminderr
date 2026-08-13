@@ -35,7 +35,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
-  static const List<int> _intervals = [1, 10, 30, 45, 60, 90, 120, 180, 240];
+  static const List<int> _intervals = [10, 30, 45, 60, 90, 120, 180, 240];
 
   int _intervalMinutes = 60;
   bool _registered = false;
